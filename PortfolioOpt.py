@@ -9,11 +9,52 @@ import io
 
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
 
+# --- SECURITY: PASSWORD PROTECTION ---
+def check_password():
+    """Returns `True` if the user had the correct password."""
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        # This checks the entered password against the secret stored in Streamlit Cloud
+        if st.session_state["password"] == st.secrets["app_password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Delete the password from memory for security
+        else:
+            st.session_state["password_correct"] = False
+
+    # If the user has already logged in successfully, return True
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Otherwise, show the login screen
+    st.title("🔒 Security Gateway")
+    st.text_input(
+        "Please enter the password to access the Portfolio Optimizer:", 
+        type="password", 
+        on_change=password_entered, 
+        key="password"
+    )
+    
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("😕 Password incorrect. Please try again.")
+        
+    return False
+
+# THE GATEKEEPER: Stop the script here if the password is wrong
+if not check_password():
+    st.stop()
+
+# ==========================================
+# --- THE REST OF YOUR APP STARTS HERE ---
+# ==========================================
+
 st.title("📈 Advanced Portfolio Optimizer & Forecaster")
 st.markdown("Optimize weights, calculate trade values, backtest history, and forecast the future.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
+
+# ... (Keep all the rest of your functions, sidebar, and main logic exactly as they were) ...
 
 # --- HELPER FUNCTION: ASSET METADATA ---
 def get_asset_metadata(ticker):
@@ -331,3 +372,16 @@ if st.session_state.optimized:
         corr_matrix = st.session_state.daily_returns.corr()
         sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
         st.pyplot(fig_corr)
+
+# --- LEGAL DISCLAIMER ---
+    st.markdown("---")
+    with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
+        st.caption("""
+        **Informational Purposes Only:** This application is provided for educational and informational purposes only. It does not constitute financial, investment, legal, or tax advice. 
+        
+        **No Guarantee of Accuracy:** The pricing data and asset metadata are sourced from free public APIs (Yahoo Finance) which may contain errors, omissions, or delays. The creator of this tool makes no representations or warranties regarding the accuracy or completeness of the data.
+        
+        **Inherent Risks:** Financial markets are volatile. The "Optimal" portfolios, Sharpe Ratios, and Monte Carlo forecasts are based purely on historical mathematical models. **Past performance is not indicative of future results.** The projections do not account for trading fees, slippage, taxes, or future market shocks. 
+        
+        **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
+        """)
