@@ -5,11 +5,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pypfopt import EfficientFrontier, risk_models, expected_returns, plotting
+import io
 
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
 
-st.title("📈 Max Sharpe Portfolio Optimizer")
-st.markdown("Upload your portfolio or enter tickers manually to find the optimal allocation.")
+st.title("📈 Advanced Portfolio Optimizer")
+st.markdown("Upload your portfolio or enter tickers manually to find your ideal allocation.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
@@ -33,6 +34,13 @@ else:
     start_date = st.sidebar.date_input("Start Date", end_date - pd.DateOffset(years=5))
     end_date = st.sidebar.date_input("End Date", end_date)
 
+st.sidebar.header("3. Optimization Strategy")
+# NEW: Dropdown for selecting the optimization objective
+opt_metric = st.sidebar.selectbox(
+    "Optimize For:", 
+    ("Max Sharpe Ratio (Best Risk-Adjusted Return)", "Minimum Volatility (Lowest Risk)")
+)
+
 optimize_button = st.sidebar.button("Run Optimization", type="primary")
 
 # --- MAIN APP LOGIC ---
@@ -54,7 +62,7 @@ if optimize_button:
         st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
-    all_tickers = list(set(tickers + [bench_clean])) # Add benchmark to download list
+    all_tickers = list(set(tickers + [bench_clean]))
 
     with st.spinner(f"Fetching data for {len(tickers)} assets + Benchmark..."):
         raw_data = yf.download(all_tickers, start=start_date, end=end_date)
@@ -73,12 +81,11 @@ if optimize_button:
         if isinstance(data, pd.Series): data = data.to_frame()
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         
-        # Separate benchmark data from portfolio data
         if bench_clean in data.columns:
             bench_data = data[bench_clean]
             port_data = data.drop(columns=[bench_clean], errors='ignore')
         else:
-            st.warning(f"Benchmark {bench_clean} data failed to load. Advanced stats may be disabled.")
+            st.warning(f"Benchmark {bench_clean} data failed to load.")
             bench_data = pd.Series(dtype=float)
             port_data = data
 
@@ -86,16 +93,22 @@ if optimize_button:
             st.error("Not enough valid asset data to optimize.")
             st.stop()
 
-    with st.spinner("Calculating optimal weights & metrics..."):
+    with st.spinner(f"Calculating {opt_metric}..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
 
         ef = EfficientFrontier(mu, S)
-        raw_weights = ef.max_sharpe()
+        
+        # NEW: Logic to branch based on user's selected dropdown metric
+        if "Max Sharpe" in opt_metric:
+            raw_weights = ef.max_sharpe()
+        else:
+            raw_weights = ef.min_volatility()
+            
         cleaned_weights = ef.clean_weights()
         ret, vol, sharpe = ef.portfolio_performance()
         
-        # Save to session state
+        st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
         st.session_state.mu = mu
         st.session_state.S = S
         st.session_state.cleaned_weights = cleaned_weights
@@ -110,7 +123,7 @@ if optimize_button:
 # --- DASHBOARD VISUALS ---
 if st.session_state.optimized:
     st.markdown("---")
-    st.subheader("Interactive What-If Analysis 🎛️")
+    st.subheader(f"Interactive What-If Analysis ({st.session_state.opt_target} Baseline) 🎛️")
     
     adj_col1, adj_col2 = st.columns([1, 2])
     with adj_col1:
@@ -119,7 +132,6 @@ if st.session_state.optimized:
         new_w_pct = st.slider(f"Target Weight for {adj_asset}", min_value=0.0, max_value=100.0, value=float(orig_w*100), step=1.0, format="%.0f%%")
         new_w = new_w_pct / 100.0
     
-    # Pro-rata distribution logic
     custom_weights = st.session_state.cleaned_weights.copy()
     for t in st.session_state.asset_list:
         if t not in custom_weights: custom_weights[t] = 0.0
@@ -136,52 +148,43 @@ if st.session_state.optimized:
     
     custom_weights[adj_asset] = new_w
     
-    # --- CALCULATE ADVANCED METRICS ---
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
     
-    risk_free_rate = 0.02 # Standard assumption in pypfopt
+    risk_free_rate = 0.02 
     c_sharpe = (c_ret - risk_free_rate) / c_vol
     
-    # Calculate daily portfolio returns for Sortino, Alpha, Beta
     port_daily = st.session_state.daily_returns.dot(w_array)
-    
-    # Sortino Ratio
     downside_returns = port_daily[port_daily < 0]
     down_stdev = np.sqrt(252) * downside_returns.std()
     c_sortino = (c_ret - risk_free_rate) / down_stdev if down_stdev > 0 else 0
 
-    # Alpha and Beta
     c_beta, c_alpha = np.nan, np.nan
     if st.session_state.bench_returns is not None:
-        # Align dates just in case
         aligned_data = pd.concat([port_daily, st.session_state.bench_returns], axis=1).dropna()
         if len(aligned_data) > 0:
             p_ret = aligned_data.iloc[:, 0]
             b_ret = aligned_data.iloc[:, 1]
-            
             cov_matrix = np.cov(p_ret, b_ret)
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
-            
             annual_bench_ret = b_ret.mean() * 252
             c_alpha = c_ret - (risk_free_rate + c_beta * (annual_bench_ret - risk_free_rate))
 
-    # --- DISPLAY METRICS ---
     st.markdown("### Advanced Risk Metrics")
     m1, m2, m3, m4, m5 = st.columns(5)
     
-    m1.metric("Sharpe Ratio", f"{c_sharpe:.2f}", help="Total Risk-Adjusted Return. Higher is better.")
-    m2.metric("Sortino Ratio", f"{c_sortino:.2f}", help="Downside Risk-Adjusted Return. Higher is better.")
+    m1.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
+    m2.metric("Sortino Ratio", f"{c_sortino:.2f}")
     
     if not np.isnan(c_beta):
-        m3.metric("Beta (β)", f"{c_beta:.2f}", help="Sensitivity to Market Volatility. 1.0 = Market. < 1.0 = Less Volatile.")
-        m4.metric("Alpha (α)", f"{c_alpha*100:.2f}%", help="Excess Return over Benchmark. Higher is better.")
+        m3.metric("Beta (β)", f"{c_beta:.2f}")
+        m4.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
     else:
         m3.metric("Beta (β)", "N/A")
         m4.metric("Alpha (α)", "N/A")
         
-    m5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%", help="Historical Annualized Volatility. Lower represents stability.")
+    m5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
 
     st.markdown("---")
     chart_col, data_col = st.columns([2, 1])
@@ -193,13 +196,26 @@ if st.session_state.optimized:
         display_df = weights_df.copy()
         display_df['Weight'] = (display_df['Weight'] * 100).round(2).astype(str) + '%'
         st.dataframe(display_df, use_container_width=True)
+        
+        # NEW: Export to CSV Button
+        csv = display_df.to_csv()
+        st.download_button(
+            label="📥 Download Weights as CSV",
+            data=csv,
+            file_name='custom_portfolio_weights.csv',
+            mime='text/csv',
+        )
 
     with chart_col:
         st.markdown("### Efficient Frontier")
         ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S)
         fig, ax = plt.subplots(figsize=(8, 5))
         plotting.plot_efficient_frontier(ef_plot, ax=ax, show_assets=True)
-        ax.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label="Max Sharpe Optimum")
+        
+        # Updates the label of the red star based on the chosen strategy
+        star_label = "Max Sharpe Optimum" if st.session_state.opt_target == "Max Sharpe" else "Min Volatility Optimum"
+        ax.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=star_label)
+        
         ax.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
         ax.set_title("")
         ax.legend()
