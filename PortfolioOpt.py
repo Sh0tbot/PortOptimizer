@@ -6,73 +6,94 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pypfopt import EfficientFrontier, risk_models, expected_returns, plotting
 import io
+import tempfile
+from fpdf import FPDF
 
-st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
+# --- UI CONFIGURATION ---
+st.set_page_config(page_title="Pro Portfolio Optimizer", layout="wide", page_icon="📈")
+sns.set_theme(style="whitegrid") # Makes all charts look modern and clean
 
 # --- SECURITY: PASSWORD PROTECTION ---
 def check_password():
-    """Returns `True` if the user had the correct password."""
-
     def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        # This checks the entered password against the secret stored in Streamlit Cloud
         if st.session_state["password"] == st.secrets["app_password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Delete the password from memory for security
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
-    # If the user has already logged in successfully, return True
     if st.session_state.get("password_correct", False):
         return True
 
-    # Otherwise, show the login screen
-    st.title("🔒 Security Gateway")
-    st.text_input(
-        "Please enter the password to access the Portfolio Optimizer:", 
-        type="password", 
-        on_change=password_entered, 
-        key="password"
-    )
-    
+    st.title("🔒 Enterprise Portfolio Optimizer")
+    st.text_input("Please enter your access password:", type="password", on_change=password_entered, key="password")
     if "password_correct" in st.session_state and not st.session_state["password_correct"]:
         st.error("😕 Password incorrect. Please try again.")
-        
     return False
 
-# THE GATEKEEPER: Stop the script here if the password is wrong
 if not check_password():
     st.stop()
 
-# ==========================================
-# --- THE REST OF YOUR APP STARTS HERE ---
-# ==========================================
-
-st.title("📈 Advanced Portfolio Optimizer & Forecaster")
-st.markdown("Optimize weights, calculate trade values, backtest history, and forecast the future.")
-
-if "optimized" not in st.session_state:
-    st.session_state.optimized = False
-
-# ... (Keep all the rest of your functions, sidebar, and main logic exactly as they were) ...
+# --- PDF GENERATOR FUNCTION ---
+def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fig_ef):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Portfolio Optimization & Strategy Report", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Metrics
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="1. Core Performance Metrics", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(100, 8, txt=f"Expected Annual Return: {ret*100:.2f}%")
+    pdf.cell(100, 8, txt=f"Annual Volatility (Risk): {vol*100:.2f}%", ln=True)
+    pdf.cell(100, 8, txt=f"Sharpe Ratio: {sharpe:.2f}")
+    pdf.cell(100, 8, txt=f"Sortino Ratio: {sortino:.2f}", ln=True)
+    pdf.cell(100, 8, txt=f"Alpha: {alpha*100:.2f}%" if not np.isnan(alpha) else "Alpha: N/A")
+    pdf.cell(100, 8, txt=f"Beta: {beta:.2f}" if not np.isnan(beta) else "Beta: N/A", ln=True)
+    pdf.ln(5)
+    
+    # Weights
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="2. Target Asset Allocation", ln=True)
+    pdf.set_font("Arial", '', 11)
+    for ticker, weight in sorted(weights_dict.items(), key=lambda x: x[1], reverse=True):
+        if weight > 0.001:
+            pdf.cell(200, 6, txt=f"{ticker}: {weight*100:.2f}%", ln=True)
+    pdf.ln(5)
+    
+    # Chart
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="3. Efficient Frontier Profile", ln=True)
+    
+    # Save matplotlib figure to a temporary image file to embed in PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+        fig_ef.savefig(tmpfile.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmpfile.name, x=15, w=180)
+        
+    # Output to bytes
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        pdf.output(tmp_pdf.name)
+        with open(tmp_pdf.name, "rb") as f:
+            return f.read()
 
 # --- HELPER FUNCTION: ASSET METADATA ---
 def get_asset_metadata(ticker):
-    asset_class = 'Other'
-    sector = 'Unknown'
+    asset_class, sector = 'Other', 'Unknown'
     try:
         info = yf.Ticker(ticker).info
-        q_type = info.get('quoteType', '').upper()
-        country = info.get('country', 'Unknown').upper()
-        category = info.get('category', '').upper()
+        q_type, country, category = info.get('quoteType', '').upper(), info.get('country', 'Unknown').upper(), info.get('category', '').upper()
         sector_info = info.get('sector', '')
         
         if sector_info: sector = sector_info
         elif category: sector = category.title()
 
         if q_type in ['MUTUALFUND', 'ETF']:
-            if 'BOND' in category or 'FIXED INCOME' in category: asset_class = 'Fixed Income'
-            elif 'MONEY MARKET' in category or 'CASH' in category: asset_class = 'Cash & Equivalents'
+            if 'BOND' in category or 'FIXED' in category: asset_class = 'Fixed Income'
+            elif 'MONEY' in category or 'CASH' in category: asset_class = 'Cash & Equivalents'
             elif 'CANADA' in category or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
             elif 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: asset_class = 'International Equities'
             else: asset_class = 'US Equities' 
@@ -82,41 +103,39 @@ def get_asset_metadata(ticker):
             elif country != 'UNKNOWN': asset_class = 'International Equities'
     except Exception:
         pass
-    
     if asset_class == 'Other' and ticker.endswith('.TO'): asset_class = 'Canadian Equities'
     return asset_class, sector
+
+# ==========================================
+# --- APP HEADER ---
+# ==========================================
+st.title("📈 Pro Portfolio Optimizer & Forecaster")
+st.markdown("Optimize allocations, forecast performance, and generate execution reports.")
+
+if "optimized" not in st.session_state:
+    st.session_state.optimized = False
 
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, JNJ, SPY")
-benchmark_ticker = st.sidebar.text_input("Benchmark (for Alpha, Beta & Backtest):", "SPY")
+benchmark_ticker = st.sidebar.text_input("Benchmark:", "SPY")
 
 st.sidebar.header("2. Historical Horizon")
-time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years", "Custom Dates"), index=2)
-
+time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years"), index=2)
 end_date = pd.Timestamp.today()
-if time_range == "1 Year": start_date = end_date - pd.DateOffset(years=1)
-elif time_range == "3 Years": start_date = end_date - pd.DateOffset(years=3)
-elif time_range == "5 Years": start_date = end_date - pd.DateOffset(years=5)
-elif time_range == "7 Years": start_date = end_date - pd.DateOffset(years=7)
-elif time_range == "10 Years": start_date = end_date - pd.DateOffset(years=10)
-else:
-    start_date = st.sidebar.date_input("Start Date", end_date - pd.DateOffset(years=5))
-    end_date = st.sidebar.date_input("End Date", end_date)
+start_date = end_date - pd.DateOffset(years=int(time_range.split()[0]))
 
-st.sidebar.header("3. Strategy & Constraints")
+st.sidebar.header("3. Strategy Settings")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
-max_weight_pct = st.sidebar.slider("Max Weight per Asset", min_value=10, max_value=100, value=100, step=5, format="%d%%")
-max_w = max_weight_pct / 100.0
+max_w = st.sidebar.slider("Max Weight per Asset", 10, 100, 100, 5) / 100.0
 
-st.sidebar.header("4. Trade & Forecast Settings")
+st.sidebar.header("4. Trade & Forecast")
 portfolio_value = st.sidebar.number_input("Total Portfolio Value ($)", min_value=1000, value=100000, step=1000)
-# NEW: Monte Carlo Inputs
-mc_years = st.sidebar.slider("Years to Forecast (Monte Carlo)", min_value=1, max_value=30, value=10)
-mc_sims = st.sidebar.selectbox("Number of Simulations", (100, 500, 1000, 5000), index=2)
+mc_years = st.sidebar.slider("Monte Carlo Years", 1, 30, 10)
+mc_sims = st.sidebar.selectbox("Simulations", (100, 500, 1000), index=1)
 
-optimize_button = st.sidebar.button("Run Analysis", type="primary")
+optimize_button = st.sidebar.button("Run Full Analysis", type="primary", use_container_width=True)
 
 # --- MAIN APP LOGIC ---
 if optimize_button:
@@ -125,19 +144,12 @@ if optimize_button:
         try:
             df = pd.read_excel(uploaded_file)
             if 'Ticker' in df.columns: tickers = df['Ticker'].dropna().astype(str).tolist()
-        except Exception:
-            st.error("Failed to read Excel file.")
-            st.stop()
+        except Exception: st.error("Failed to read Excel file."); st.stop()
     else:
         tickers = [t.strip().upper() for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
 
-    if len(tickers) < 2:
-        st.warning("Please provide at least two valid tickers.")
-        st.stop()
-        
-    if max_w < (1.0 / len(tickers)):
-        st.error(f"Constraint mathematically impossible! Must be at least {np.ceil((1.0/len(tickers))*100)}%.")
-        st.stop()
+    if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
+    if max_w < (1.0 / len(tickers)): st.error(f"Constraint mathematically impossible."); st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
@@ -146,16 +158,11 @@ if optimize_button:
         raw_data = yf.download(all_tickers, start=start_date, end=end_date)
         st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
         
-        if raw_data.empty:
-            st.error("No data found.")
-            st.stop()
-            
+        if raw_data.empty: st.error("No data found."); st.stop()
         try: data = raw_data['Adj Close']
         except KeyError:
             try: data = raw_data['Close']
-            except KeyError:
-                st.error("Pricing columns not found.")
-                st.stop()
+            except KeyError: st.error("Pricing columns not found."); st.stop()
 
         if isinstance(data, pd.Series): data = data.to_frame()
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
@@ -167,20 +174,14 @@ if optimize_button:
             bench_data = pd.Series(dtype=float)
             port_data = data
 
-        if port_data.shape[1] < 2:
-            st.error("Not enough valid asset data.")
-            st.stop()
-
     with st.spinner("Crunching the math..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
-
         ef = EfficientFrontier(mu, S, weight_bounds=(0, max_w))
         raw_weights = ef.max_sharpe() if "Max Sharpe" in opt_metric else ef.min_volatility()
             
         st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
-        st.session_state.mu = mu
-        st.session_state.S = S
+        st.session_state.mu, st.session_state.S = mu, S
         st.session_state.cleaned_weights = ef.clean_weights()
         st.session_state.ret, st.session_state.vol, st.session_state.sharpe = ef.portfolio_performance()
         st.session_state.asset_list = list(mu.index)
@@ -191,28 +192,27 @@ if optimize_button:
 # --- DASHBOARD VISUALS ---
 if st.session_state.optimized:
     st.markdown("---")
-    st.subheader(f"Interactive Adjustments ({st.session_state.opt_target} Baseline) 🎛️")
     
+    # THE WHAT-IF SLIDER
+    st.subheader(f"🎛️ Adjust Allocation ({st.session_state.opt_target} Baseline)")
     adj_col1, adj_col2 = st.columns([1, 2])
     with adj_col1:
         adj_asset = st.selectbox("Select Asset to Adjust:", st.session_state.asset_list)
         orig_w = st.session_state.cleaned_weights.get(adj_asset, 0.0)
-        new_w_pct = st.slider(f"Target Weight for {adj_asset}", min_value=0.0, max_value=100.0, value=float(orig_w*100), step=1.0, format="%.0f%%")
-        new_w = new_w_pct / 100.0
+        new_w = st.slider(f"Target Weight for {adj_asset}", 0.0, 100.0, float(orig_w*100), 1.0, format="%.0f%%") / 100.0
     
     custom_weights = st.session_state.cleaned_weights.copy()
     for t in st.session_state.asset_list:
         if t not in custom_weights: custom_weights[t] = 0.0
             
-    old_remaining = 1.0 - orig_w
-    new_remaining = 1.0 - new_w
-    
+    old_rem, new_rem = 1.0 - orig_w, 1.0 - new_w
     for t in custom_weights:
         if t != adj_asset:
-            if old_remaining > 0: custom_weights[t] = custom_weights[t] * (new_remaining / old_remaining)
-            else: custom_weights[t] = new_remaining / (len(custom_weights) - 1)
+            if old_rem > 0: custom_weights[t] *= (new_rem / old_rem)
+            else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
     custom_weights[adj_asset] = new_w
     
+    # MATH CALCULATIONS
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -233,155 +233,143 @@ if st.session_state.optimized:
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
             c_alpha = c_ret - (risk_free_rate + c_beta * ((b_ret.mean() * 252) - risk_free_rate))
 
-    st.markdown("### Risk & Return Metrics")
+    # --- TOP METRICS BOARD ---
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Exp. Return", f"{c_ret*100:.2f}%")
     m2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
     m3.metric("Sortino Ratio", f"{c_sortino:.2f}")
     if not np.isnan(c_beta):
-        m4.metric("Beta (β)", f"{c_beta:.2f}")
-        m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
-    else:
-        m4.metric("Beta", "N/A"); m5.metric("Alpha", "N/A")
+        m4.metric("Beta (β)", f"{c_beta:.2f}"); m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
+    else: m4.metric("Beta", "N/A"); m5.metric("Alpha", "N/A")
     m6.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
-
+    
     st.markdown("---")
-    
-    st.markdown("### Trade Calculator & Allocation Breakdown")
-    trade_data = []
-    for t, w in custom_weights.items():
-        if w > 0.001:
-            a_class, a_sector = st.session_state.asset_meta.get(t, ('Other', 'Unknown'))
-            trade_data.append({
-                'Ticker': t, 'Weight': w, 'Dollar Value ($)': w * portfolio_value,
-                'Asset Class': a_class, 'Sector': a_sector
-            })
-            
-    trade_df = pd.DataFrame(trade_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
-    calc_col1, calc_col2 = st.columns([2, 1])
-    with calc_col1:
-        display_trade = trade_df.copy()
-        display_trade['Weight'] = (display_trade['Weight'] * 100).round(2).astype(str) + '%'
-        display_trade['Dollar Value ($)'] = display_trade['Dollar Value ($)'].apply(lambda x: f"${x:,.2f}")
-        st.dataframe(display_trade, use_container_width=True)
-    with calc_col2:
-        sector_totals = trade_df.groupby('Sector')['Weight'].sum()
-        fig_sec, ax_sec = plt.subplots(figsize=(4, 4))
-        ax_sec.pie(sector_totals, labels=sector_totals.index, autopct='%1.1f%%', colors=sns.color_palette("Set3"))
-        fig_sec.patch.set_alpha(0.0)
-        st.pyplot(fig_sec)
 
-    st.markdown("---")
-    
-    # --- MONTE CARLO SIMULATION ---
-    st.markdown(f"### Future Projection: Monte Carlo Simulation ({mc_years} Years)")
-    st.markdown(f"Running **{mc_sims}** simulated lifetimes based on your custom portfolio's historical return and volatility.")
-    
-    # Monte Carlo Math (Geometric Brownian Motion)
-    np.random.seed(42) # Keeps paths stable when moving sliders
-    dt = 1 # Annual steps for speed and clarity
-    
-    sim_results = np.zeros((mc_sims, mc_years + 1))
-    sim_results[:, 0] = portfolio_value
-    
-    for i in range(mc_sims):
-        Z = np.random.standard_normal(mc_years)
-        # W_t = W_{t-1} * exp((mu - (sigma^2)/2)dt + sigma * sqrt(dt) * Z)
-        growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
-        sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
-        
-    final_values = sim_results[:, -1]
-    median_val = np.percentile(final_values, 50)
-    pct_10 = np.percentile(final_values, 10)
-    pct_90 = np.percentile(final_values, 90)
-    
-    mc_col1, mc_col2 = st.columns([3, 1])
-    
-    with mc_col1:
-        fig_mc, ax_mc = plt.subplots(figsize=(10, 5))
-        # Plot a sample of paths (up to 100) for visual texture
-        for i in range(min(100, mc_sims)):
-            ax_mc.plot(sim_results[i, :], color='gray', alpha=0.1)
-            
-        median_path = np.percentile(sim_results, 50, axis=0)
-        pct_10_path = np.percentile(sim_results, 10, axis=0)
-        pct_90_path = np.percentile(sim_results, 90, axis=0)
-        
-        ax_mc.plot(median_path, color='blue', linewidth=2, label=f'Median: ${median_val:,.0f}')
-        ax_mc.plot(pct_10_path, color='red', linewidth=2, linestyle='--', label=f'10th Percentile (Bear): ${pct_10:,.0f}')
-        ax_mc.plot(pct_90_path, color='green', linewidth=2, linestyle='--', label=f'90th Percentile (Bull): ${pct_90:,.0f}')
-        
-        ax_mc.set_xlim(0, mc_years)
-        ax_mc.set_xlabel("Years into the Future")
-        ax_mc.set_ylabel("Projected Value ($)")
-        ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
-        ax_mc.legend()
-        st.pyplot(fig_mc)
-        
-    with mc_col2:
-        st.markdown("#### Expected Outcomes")
-        st.info(f"**Bull Market (90th Pct):**\n${pct_90:,.2f}")
-        st.success(f"**Median Expectation:**\n${median_val:,.2f}")
-        st.error(f"**Bear Market (10th Pct):**\n${pct_10:,.2f}")
-        st.markdown("*Note: Assumes historical risk/return patterns continue, and does not account for future deposits or inflation.*")
+    # ==========================================
+    # --- PRO TAPPED NAVIGATION ---
+    # ==========================================
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio & Optimization", "💱 Trade Calculator", "📈 Historical Backtest", "🔮 Monte Carlo Forecast"])
 
-    st.markdown("---")
-    
-    # --- HISTORICAL BACKTESTING ---
-    st.markdown("### Historical Backtest ($10,000 Growth & Drawdowns)")
-    port_wealth = (1 + port_daily).cumprod() * 10000
-    bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
-    rolling_max = port_wealth.cummax()
-    drawdown = (port_wealth - rolling_max) / rolling_max
-    
-    bt_col1, bt_col2 = st.columns(2)
-    with bt_col1:
-        fig_wealth, ax_wealth = plt.subplots(figsize=(8, 5))
-        ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='blue', linewidth=2)
-        if bench_wealth is not None:
-            bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
-            ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark ({benchmark_ticker})", color='gray', alpha=0.7)
-        ax_wealth.set_ylabel("Portfolio Value ($)")
-        ax_wealth.grid(True, linestyle='--', alpha=0.6)
-        ax_wealth.legend()
-        st.pyplot(fig_wealth)
-    with bt_col2:
-        fig_dd, ax_dd = plt.subplots(figsize=(8, 5))
-        ax_dd.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
-        ax_dd.plot(drawdown.index, drawdown, color='red', linewidth=1)
-        ax_dd.set_ylabel("Drawdown (%)")
-        vals = ax_dd.get_yticks()
-        ax_dd.set_yticklabels(['{:,.0%}'.format(x) for x in vals])
-        ax_dd.grid(True, linestyle='--', alpha=0.6)
-        st.pyplot(fig_dd)
-
-    st.markdown("---")
-    
-    st.markdown("### Optimization Charts")
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
+    with tab1:
+        st.markdown("### Asset Allocation & Efficient Frontier")
+        
+        col_charts1, col_charts2 = st.columns([1, 1])
+        
+        # We generate the figure here so we can pass it to the PDF function later
         ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
-        fig_ef, ax_ef = plt.subplots(figsize=(8, 5))
+        fig_ef, ax_ef = plt.subplots(figsize=(6, 4))
         plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
-        ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target} Optimum")
+        ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target}")
         ax_ef.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
+        ax_ef.set_title("Efficient Frontier Profile")
         ax_ef.legend()
-        st.pyplot(fig_ef)
-    with chart_col2:
-        fig_corr, ax_corr = plt.subplots(figsize=(8, 5))
-        corr_matrix = st.session_state.daily_returns.corr()
-        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
-        st.pyplot(fig_corr)
+        
+        with col_charts1:
+            st.pyplot(fig_ef)
+            
+            # PDF DOWNLOAD BUTTON
+            pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, fig_ef)
+            st.download_button(
+                label="📄 Download Professional PDF Report",
+                data=pdf_bytes,
+                file_name="Portfolio_Report.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
 
-# --- LEGAL DISCLAIMER ---
+        with col_charts2:
+            fig_corr, ax_corr = plt.subplots(figsize=(6, 4))
+            corr_matrix = st.session_state.daily_returns.corr()
+            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
+            ax_corr.set_title("Asset Correlation Matrix")
+            st.pyplot(fig_corr)
+
+    with tab2:
+        st.markdown("### Execution Plan & Breakdown")
+        trade_data = []
+        for t, w in custom_weights.items():
+            if w > 0.001:
+                a_class, a_sector = st.session_state.asset_meta.get(t, ('Other', 'Unknown'))
+                trade_data.append({'Ticker': t, 'Weight': w, 'Dollar Value ($)': w * portfolio_value, 'Asset Class': a_class, 'Sector': a_sector})
+                
+        trade_df = pd.DataFrame(trade_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
+        calc_col1, calc_col2 = st.columns([2, 1])
+        
+        with calc_col1:
+            display_trade = trade_df.copy()
+            display_trade['Weight'] = (display_trade['Weight'] * 100).round(2).astype(str) + '%'
+            display_trade['Dollar Value ($)'] = display_trade['Dollar Value ($)'].apply(lambda x: f"${x:,.2f}")
+            st.dataframe(display_trade, use_container_width=True)
+            csv = display_trade.to_csv(index=False)
+            st.download_button("📥 Download Trade Sheet (CSV)", data=csv, file_name='trade_calculator.csv', mime='text/csv')
+            
+        with calc_col2:
+            sector_totals = trade_df.groupby('Sector')['Weight'].sum()
+            fig_sec, ax_sec = plt.subplots(figsize=(4, 4))
+            ax_sec.pie(sector_totals, labels=sector_totals.index, autopct='%1.1f%%', colors=sns.color_palette("muted"))
+            ax_sec.set_title("Sector Exposure")
+            st.pyplot(fig_sec)
+
+    with tab3:
+        st.markdown("### Historical $10k Growth & Drawdowns")
+        port_wealth = (1 + port_daily).cumprod() * 10000
+        bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
+        rolling_max = port_wealth.cummax()
+        drawdown = (port_wealth - rolling_max) / rolling_max
+        
+        bt_col1, bt_col2 = st.columns(2)
+        with bt_col1:
+            fig_wealth, ax_wealth = plt.subplots(figsize=(7, 4))
+            ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='#1f77b4', linewidth=2)
+            if bench_wealth is not None:
+                bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
+                ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark", color='gray', alpha=0.7)
+            ax_wealth.set_ylabel("Portfolio Value ($)")
+            ax_wealth.legend()
+            st.pyplot(fig_wealth)
+        with bt_col2:
+            fig_dd, ax_dd = plt.subplots(figsize=(7, 4))
+            ax_dd.fill_between(drawdown.index, drawdown, 0, color='#d62728', alpha=0.3)
+            ax_dd.plot(drawdown.index, drawdown, color='#d62728', linewidth=1)
+            ax_dd.set_ylabel("Drawdown (%)")
+            ax_dd.set_yticklabels(['{:,.0%}'.format(x) for x in ax_dd.get_yticks()])
+            st.pyplot(fig_dd)
+
+    with tab4:
+        st.markdown(f"### Monte Carlo Projection ({mc_years} Years | {mc_sims} Sims)")
+        np.random.seed(42)
+        dt = 1
+        sim_results = np.zeros((int(mc_sims), mc_years + 1))
+        sim_results[:, 0] = portfolio_value
+        
+        for i in range(int(mc_sims)):
+            Z = np.random.standard_normal(mc_years)
+            growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
+            sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
+            
+        final_values = sim_results[:, -1]
+        median_val = np.percentile(final_values, 50)
+        pct_10, pct_90 = np.percentile(final_values, 10), np.percentile(final_values, 90)
+        
+        mc_col1, mc_col2 = st.columns([3, 1])
+        with mc_col1:
+            fig_mc, ax_mc = plt.subplots(figsize=(8, 4))
+            for i in range(min(100, int(mc_sims))): ax_mc.plot(sim_results[i, :], color='gray', alpha=0.1)
+            ax_mc.plot(np.percentile(sim_results, 50, axis=0), color='#1f77b4', linewidth=2, label=f'Median: ${median_val:,.0f}')
+            ax_mc.plot(np.percentile(sim_results, 10, axis=0), color='#d62728', linewidth=2, linestyle='--', label=f'Bear (10%): ${pct_10:,.0f}')
+            ax_mc.plot(np.percentile(sim_results, 90, axis=0), color='#2ca02c', linewidth=2, linestyle='--', label=f'Bull (90%): ${pct_90:,.0f}')
+            ax_mc.set_xlim(0, mc_years)
+            ax_mc.set_ylabel("Projected Value ($)")
+            ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
+            ax_mc.legend()
+            st.pyplot(fig_mc)
+            
+        with mc_col2:
+            st.info(f"**Bull Market:**\n${pct_90:,.2f}")
+            st.success(f"**Median:**\n${median_val:,.2f}")
+            st.error(f"**Bear Market:**\n${pct_10:,.2f}")
+
+    # --- LEGAL DISCLAIMER ---
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
-        st.caption("""
-        **Informational Purposes Only:** This application is provided for educational and informational purposes only. It does not constitute financial, investment, legal, or tax advice. 
-        
-        **No Guarantee of Accuracy:** The pricing data and asset metadata are sourced from free public APIs (Yahoo Finance) which may contain errors, omissions, or delays. The creator of this tool makes no representations or warranties regarding the accuracy or completeness of the data.
-        
-        **Inherent Risks:** Financial markets are volatile. The "Optimal" portfolios, Sharpe Ratios, and Monte Carlo forecasts are based purely on historical mathematical models. **Past performance is not indicative of future results.** The projections do not account for trading fees, slippage, taxes, or future market shocks. 
-        
-        **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
-        """)
+        st.caption("""**Informational Purposes Only:** This app is for educational purposes and does not constitute financial advice. **Use at Your Own Risk:** The creator accepts no liability for investment decisions made using this tool. Past performance is not indicative of future results.""")
