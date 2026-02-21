@@ -10,15 +10,45 @@ import io
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
 
 st.title("📈 Advanced Portfolio Optimizer")
-st.markdown("Upload your portfolio or enter tickers manually to find your ideal allocation.")
+st.markdown("Optimize your portfolio, apply constraints, and analyze your asset allocation.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
 
+# --- HELPER FUNCTION: ASSET CLASSIFICATION ---
+def classify_asset(ticker):
+    """Attempts to categorize an asset based on Yahoo Finance metadata."""
+    try:
+        info = yf.Ticker(ticker).info
+        q_type = info.get('quoteType', '').upper()
+        country = info.get('country', 'Unknown').upper()
+        category = info.get('category', '').upper()
+        
+        # Check for Cash/Bonds via Mutual Funds or ETFs
+        if q_type in ['MUTUALFUND', 'ETF']:
+            if 'BOND' in category or 'FIXED INCOME' in category: return 'Fixed Income'
+            if 'MONEY MARKET' in category or 'CASH' in category: return 'Cash & Equivalents'
+            if 'CANADA' in category or ticker.endswith('.TO'): return 'Canadian Equities'
+            if 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: return 'International Equities'
+            return 'US Equities' # Fallback for US-listed funds
+            
+        # Check Equities by Country
+        else:
+            if country == 'CANADA' or ticker.endswith('.TO'): return 'Canadian Equities'
+            if country == 'UNITED STATES': return 'US Equities'
+            if country != 'UNKNOWN': return 'International Equities'
+            
+    except Exception:
+        pass
+    
+    # Absolute Fallback based on ticker suffix
+    if ticker.endswith('.TO'): return 'Canadian Equities'
+    return 'Other'
+
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
-uploaded_file = st.sidebar.file_uploader("Upload Excel File (Must have a 'Ticker' column)", type=["xlsx", "xls"])
-manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG")
+uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
+manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, XIU.TO, XBB.TO")
 benchmark_ticker = st.sidebar.text_input("Benchmark (for Alpha & Beta):", "SPY")
 
 st.sidebar.header("2. Time Horizon")
@@ -35,11 +65,11 @@ else:
     end_date = st.sidebar.date_input("End Date", end_date)
 
 st.sidebar.header("3. Optimization Strategy")
-# NEW: Dropdown for selecting the optimization objective
-opt_metric = st.sidebar.selectbox(
-    "Optimize For:", 
-    ("Max Sharpe Ratio (Best Risk-Adjusted Return)", "Minimum Volatility (Lowest Risk)")
-)
+opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
+
+# NEW: Position Sizing Constraint
+max_weight_pct = st.sidebar.slider("Max Weight per Asset Constraint", min_value=10, max_value=100, value=100, step=5, format="%d%%")
+max_w = max_weight_pct / 100.0
 
 optimize_button = st.sidebar.button("Run Optimization", type="primary")
 
@@ -61,11 +91,19 @@ if optimize_button:
         st.warning("Please provide at least two valid tickers.")
         st.stop()
         
+    # Mathematical reality check for constraints
+    if max_w < (1.0 / len(tickers)):
+        st.error(f"Constraint mathematically impossible! You have {len(tickers)} assets. The max weight must be at least {np.ceil((1.0/len(tickers))*100)}%.")
+        st.stop()
+        
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
 
-    with st.spinner(f"Fetching data for {len(tickers)} assets + Benchmark..."):
+    with st.spinner("Downloading pricing data and asset metadata..."):
         raw_data = yf.download(all_tickers, start=start_date, end=end_date)
+        
+        # Map Asset Classes (Dictionary Comprehension)
+        st.session_state.asset_classes = {t: classify_asset(t) for t in tickers}
         
         if raw_data.empty:
             st.error("No data found.")
@@ -85,21 +123,20 @@ if optimize_button:
             bench_data = data[bench_clean]
             port_data = data.drop(columns=[bench_clean], errors='ignore')
         else:
-            st.warning(f"Benchmark {bench_clean} data failed to load.")
             bench_data = pd.Series(dtype=float)
             port_data = data
 
         if port_data.shape[1] < 2:
-            st.error("Not enough valid asset data to optimize.")
+            st.error("Not enough valid asset data.")
             st.stop()
 
-    with st.spinner(f"Calculating {opt_metric}..."):
+    with st.spinner(f"Applying constraints and calculating {opt_metric}..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
 
-        ef = EfficientFrontier(mu, S)
+        # APPLY THE USER CONSTRAINT HERE
+        ef = EfficientFrontier(mu, S, weight_bounds=(0, max_w))
         
-        # NEW: Logic to branch based on user's selected dropdown metric
         if "Max Sharpe" in opt_metric:
             raw_weights = ef.max_sharpe()
         else:
@@ -141,10 +178,8 @@ if st.session_state.optimized:
     
     for t in custom_weights:
         if t != adj_asset:
-            if old_remaining > 0:
-                custom_weights[t] = custom_weights[t] * (new_remaining / old_remaining)
-            else:
-                custom_weights[t] = new_remaining / (len(custom_weights) - 1)
+            if old_remaining > 0: custom_weights[t] = custom_weights[t] * (new_remaining / old_remaining)
+            else: custom_weights[t] = new_remaining / (len(custom_weights) - 1)
     
     custom_weights[adj_asset] = new_w
     
@@ -171,52 +206,93 @@ if st.session_state.optimized:
             annual_bench_ret = b_ret.mean() * 252
             c_alpha = c_ret - (risk_free_rate + c_beta * (annual_bench_ret - risk_free_rate))
 
-    st.markdown("### Advanced Risk Metrics")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    st.markdown("### Risk & Return Metrics")
+    # RESTORED EXPECTED RETURN TO THE TOP METRICS
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     
-    m1.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
-    m2.metric("Sortino Ratio", f"{c_sortino:.2f}")
+    m1.metric("Exp. Return", f"{c_ret*100:.2f}%")
+    m2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
+    m3.metric("Sortino Ratio", f"{c_sortino:.2f}")
     
     if not np.isnan(c_beta):
-        m3.metric("Beta (β)", f"{c_beta:.2f}")
-        m4.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
+        m4.metric("Beta (β)", f"{c_beta:.2f}")
+        m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
     else:
-        m3.metric("Beta (β)", "N/A")
-        m4.metric("Alpha (α)", "N/A")
+        m4.metric("Beta (β)", "N/A")
+        m5.metric("Alpha (α)", "N/A")
         
-    m5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
+    m6.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
 
     st.markdown("---")
-    chart_col, data_col = st.columns([2, 1])
+    
+    # --- ASSET ALLOCATION & WEIGHTS SECTION ---
+    st.markdown("### Portfolio Allocation")
+    alloc_col1, alloc_col2, alloc_col3 = st.columns([1, 1, 1.5])
 
-    with data_col:
-        st.markdown("### Custom Weights")
+    # 1. Compile Asset Class Totals
+    allocation_totals = {
+        'Cash & Equivalents': 0.0,
+        'Fixed Income': 0.0,
+        'Canadian Equities': 0.0,
+        'US Equities': 0.0,
+        'International Equities': 0.0,
+        'Other': 0.0
+    }
+    
+    for t, w in custom_weights.items():
+        a_class = st.session_state.asset_classes.get(t, 'Other')
+        allocation_totals[a_class] += w
+        
+    alloc_df = pd.DataFrame(list(allocation_totals.items()), columns=['Category', 'Weight'])
+    alloc_df = alloc_df[alloc_df['Weight'] > 0.001].sort_values(by='Weight', ascending=False).reset_index(drop=True)
+
+    with alloc_col1:
+        st.markdown("**By Asset Class**")
+        display_alloc = alloc_df.copy()
+        display_alloc['Weight'] = (display_alloc['Weight'] * 100).round(2).astype(str) + '%'
+        st.dataframe(display_alloc, use_container_width=True)
+
+    with alloc_col2:
+        st.markdown("**By Individual Security**")
         weights_df = pd.DataFrame.from_dict(custom_weights, orient='index', columns=['Weight'])
         weights_df = weights_df[weights_df['Weight'] > 0.001].sort_values(by='Weight', ascending=False)
         display_df = weights_df.copy()
         display_df['Weight'] = (display_df['Weight'] * 100).round(2).astype(str) + '%'
         st.dataframe(display_df, use_container_width=True)
         
-        # NEW: Export to CSV Button
         csv = display_df.to_csv()
-        st.download_button(
-            label="📥 Download Weights as CSV",
-            data=csv,
-            file_name='custom_portfolio_weights.csv',
-            mime='text/csv',
-        )
+        st.download_button("📥 Download Weights", data=csv, file_name='portfolio_weights.csv', mime='text/csv')
 
-    with chart_col:
+    with alloc_col3:
+        st.markdown("**Allocation Breakdown**")
+        fig_pie, ax_pie = plt.subplots(figsize=(5, 4))
+        ax_pie.pie(alloc_df['Weight'], labels=alloc_df['Category'], autopct='%1.1f%%', startangle=90, 
+                   colors=sns.color_palette("pastel"))
+        ax_pie.axis('equal') 
+        fig_pie.patch.set_alpha(0.0) # Transparent background
+        st.pyplot(fig_pie)
+
+    st.markdown("---")
+    
+    # --- RESTORED CORRELATION MATRIX & EFFICIENT FRONTIER ---
+    chart_col1, chart_col2 = st.columns(2)
+    
+    with chart_col1:
         st.markdown("### Efficient Frontier")
-        ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S)
-        fig, ax = plt.subplots(figsize=(8, 5))
+        ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
+        fig, ax = plt.subplots(figsize=(8, 6))
         plotting.plot_efficient_frontier(ef_plot, ax=ax, show_assets=True)
         
-        # Updates the label of the red star based on the chosen strategy
-        star_label = "Max Sharpe Optimum" if st.session_state.opt_target == "Max Sharpe" else "Min Volatility Optimum"
+        star_label = f"{st.session_state.opt_target} Optimum"
         ax.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=star_label)
-        
         ax.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
         ax.set_title("")
         ax.legend()
         st.pyplot(fig)
+        
+    with chart_col2:
+        st.markdown("### Asset Correlation Matrix")
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        corr_matrix = st.session_state.daily_returns.corr()
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax2, fmt=".2f", cbar=False)
+        st.pyplot(fig2)
