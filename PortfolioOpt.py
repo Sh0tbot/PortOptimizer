@@ -49,16 +49,36 @@ if optimize_button:
         st.warning("Please provide at least two valid tickers.")
         st.stop()
 
-    # 2. Fetch Data
+   # 2. Fetch Data
     with st.spinner(f"Fetching historical data for {len(tickers)} assets..."):
-        data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+        # Download the raw data first without forcing a column selection
+        raw_data = yf.download(tickers, start=start_date, end=end_date)
         
-        if data.empty:
+        if raw_data.empty:
             st.error("No data found. Please check your ticker symbols or date range.")
             st.stop()
+            
+        # Safely attempt to extract 'Adj Close', fallback to 'Close' if it fails
+        try:
+            data = raw_data['Adj Close']
+        except KeyError:
+            try:
+                data = raw_data['Close']
+            except KeyError:
+                st.error("Error: Could not find 'Adj Close' or 'Close' pricing columns.")
+                st.stop()
 
-        # Handle missing data (drop columns with too many NaNs, fill the rest)
-        data = data.dropna(axis=1, thresh=int(len(data)*0.8)).fillna(method='ffill')
+        # If only 1 ticker was valid, pandas returns a Series. Force it to a DataFrame.
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
+
+        # Clean the data: drop assets missing >20% of data, then forward/back fill the rest
+        data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
+        
+        # Final safety check: Do we have at least 2 assets left to optimize?
+        if data.shape[1] < 2:
+            st.error(f"Not enough valid data. We need at least 2 assets, but only found usable data for {data.shape[1]}.")
+            st.stop()
 
     # 3. Optimize Portfolio
     with st.spinner("Calculating optimal weights..."):
@@ -107,4 +127,5 @@ if optimize_button:
     fig2, ax2 = plt.subplots(figsize=(10, 6))
     correlation_matrix = data.pct_change().corr()
     sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax2, fmt=".2f")
+
     st.pyplot(fig2)
