@@ -9,49 +9,49 @@ import io
 
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
 
-st.title("📈 Advanced Portfolio Optimizer")
-st.markdown("Optimize your portfolio, apply constraints, and analyze your asset allocation.")
+st.title("📈 Advanced Portfolio Optimizer & Forecaster")
+st.markdown("Optimize weights, calculate trade values, backtest history, and forecast the future.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
 
-# --- HELPER FUNCTION: ASSET CLASSIFICATION ---
-def classify_asset(ticker):
-    """Attempts to categorize an asset based on Yahoo Finance metadata."""
+# --- HELPER FUNCTION: ASSET METADATA ---
+def get_asset_metadata(ticker):
+    asset_class = 'Other'
+    sector = 'Unknown'
     try:
         info = yf.Ticker(ticker).info
         q_type = info.get('quoteType', '').upper()
         country = info.get('country', 'Unknown').upper()
         category = info.get('category', '').upper()
+        sector_info = info.get('sector', '')
         
-        # Check for Cash/Bonds via Mutual Funds or ETFs
+        if sector_info: sector = sector_info
+        elif category: sector = category.title()
+
         if q_type in ['MUTUALFUND', 'ETF']:
-            if 'BOND' in category or 'FIXED INCOME' in category: return 'Fixed Income'
-            if 'MONEY MARKET' in category or 'CASH' in category: return 'Cash & Equivalents'
-            if 'CANADA' in category or ticker.endswith('.TO'): return 'Canadian Equities'
-            if 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: return 'International Equities'
-            return 'US Equities' # Fallback for US-listed funds
-            
-        # Check Equities by Country
+            if 'BOND' in category or 'FIXED INCOME' in category: asset_class = 'Fixed Income'
+            elif 'MONEY MARKET' in category or 'CASH' in category: asset_class = 'Cash & Equivalents'
+            elif 'CANADA' in category or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
+            elif 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: asset_class = 'International Equities'
+            else: asset_class = 'US Equities' 
         else:
-            if country == 'CANADA' or ticker.endswith('.TO'): return 'Canadian Equities'
-            if country == 'UNITED STATES': return 'US Equities'
-            if country != 'UNKNOWN': return 'International Equities'
-            
+            if country == 'CANADA' or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
+            elif country == 'UNITED STATES': asset_class = 'US Equities'
+            elif country != 'UNKNOWN': asset_class = 'International Equities'
     except Exception:
         pass
     
-    # Absolute Fallback based on ticker suffix
-    if ticker.endswith('.TO'): return 'Canadian Equities'
-    return 'Other'
+    if asset_class == 'Other' and ticker.endswith('.TO'): asset_class = 'Canadian Equities'
+    return asset_class, sector
 
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, XIU.TO, XBB.TO")
-benchmark_ticker = st.sidebar.text_input("Benchmark (for Alpha & Beta):", "SPY")
+manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, JNJ, SPY")
+benchmark_ticker = st.sidebar.text_input("Benchmark (for Alpha, Beta & Backtest):", "SPY")
 
-st.sidebar.header("2. Time Horizon")
+st.sidebar.header("2. Historical Horizon")
 time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years", "Custom Dates"), index=2)
 
 end_date = pd.Timestamp.today()
@@ -64,14 +64,18 @@ else:
     start_date = st.sidebar.date_input("Start Date", end_date - pd.DateOffset(years=5))
     end_date = st.sidebar.date_input("End Date", end_date)
 
-st.sidebar.header("3. Optimization Strategy")
+st.sidebar.header("3. Strategy & Constraints")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
-
-# NEW: Position Sizing Constraint
-max_weight_pct = st.sidebar.slider("Max Weight per Asset Constraint", min_value=10, max_value=100, value=100, step=5, format="%d%%")
+max_weight_pct = st.sidebar.slider("Max Weight per Asset", min_value=10, max_value=100, value=100, step=5, format="%d%%")
 max_w = max_weight_pct / 100.0
 
-optimize_button = st.sidebar.button("Run Optimization", type="primary")
+st.sidebar.header("4. Trade & Forecast Settings")
+portfolio_value = st.sidebar.number_input("Total Portfolio Value ($)", min_value=1000, value=100000, step=1000)
+# NEW: Monte Carlo Inputs
+mc_years = st.sidebar.slider("Years to Forecast (Monte Carlo)", min_value=1, max_value=30, value=10)
+mc_sims = st.sidebar.selectbox("Number of Simulations", (100, 500, 1000, 5000), index=2)
+
+optimize_button = st.sidebar.button("Run Analysis", type="primary")
 
 # --- MAIN APP LOGIC ---
 if optimize_button:
@@ -79,8 +83,7 @@ if optimize_button:
     if uploaded_file is not None:
         try:
             df = pd.read_excel(uploaded_file)
-            if 'Ticker' in df.columns:
-                tickers = df['Ticker'].dropna().astype(str).tolist()
+            if 'Ticker' in df.columns: tickers = df['Ticker'].dropna().astype(str).tolist()
         except Exception:
             st.error("Failed to read Excel file.")
             st.stop()
@@ -91,19 +94,16 @@ if optimize_button:
         st.warning("Please provide at least two valid tickers.")
         st.stop()
         
-    # Mathematical reality check for constraints
     if max_w < (1.0 / len(tickers)):
-        st.error(f"Constraint mathematically impossible! You have {len(tickers)} assets. The max weight must be at least {np.ceil((1.0/len(tickers))*100)}%.")
+        st.error(f"Constraint mathematically impossible! Must be at least {np.ceil((1.0/len(tickers))*100)}%.")
         st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
 
-    with st.spinner("Downloading pricing data and asset metadata..."):
+    with st.spinner("Downloading market data and categorizing assets..."):
         raw_data = yf.download(all_tickers, start=start_date, end=end_date)
-        
-        # Map Asset Classes (Dictionary Comprehension)
-        st.session_state.asset_classes = {t: classify_asset(t) for t in tickers}
+        st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
         
         if raw_data.empty:
             st.error("No data found.")
@@ -130,28 +130,18 @@ if optimize_button:
             st.error("Not enough valid asset data.")
             st.stop()
 
-    with st.spinner(f"Applying constraints and calculating {opt_metric}..."):
+    with st.spinner("Crunching the math..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
 
-        # APPLY THE USER CONSTRAINT HERE
         ef = EfficientFrontier(mu, S, weight_bounds=(0, max_w))
-        
-        if "Max Sharpe" in opt_metric:
-            raw_weights = ef.max_sharpe()
-        else:
-            raw_weights = ef.min_volatility()
+        raw_weights = ef.max_sharpe() if "Max Sharpe" in opt_metric else ef.min_volatility()
             
-        cleaned_weights = ef.clean_weights()
-        ret, vol, sharpe = ef.portfolio_performance()
-        
         st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
         st.session_state.mu = mu
         st.session_state.S = S
-        st.session_state.cleaned_weights = cleaned_weights
-        st.session_state.ret = ret
-        st.session_state.vol = vol
-        st.session_state.sharpe = sharpe
+        st.session_state.cleaned_weights = ef.clean_weights()
+        st.session_state.ret, st.session_state.vol, st.session_state.sharpe = ef.portfolio_performance()
         st.session_state.asset_list = list(mu.index)
         st.session_state.daily_returns = port_data.pct_change().dropna()
         st.session_state.bench_returns = bench_data.pct_change().dropna() if not bench_data.empty else None
@@ -160,7 +150,7 @@ if optimize_button:
 # --- DASHBOARD VISUALS ---
 if st.session_state.optimized:
     st.markdown("---")
-    st.subheader(f"Interactive What-If Analysis ({st.session_state.opt_target} Baseline) 🎛️")
+    st.subheader(f"Interactive Adjustments ({st.session_state.opt_target} Baseline) 🎛️")
     
     adj_col1, adj_col2 = st.columns([1, 2])
     with adj_col1:
@@ -180,13 +170,11 @@ if st.session_state.optimized:
         if t != adj_asset:
             if old_remaining > 0: custom_weights[t] = custom_weights[t] * (new_remaining / old_remaining)
             else: custom_weights[t] = new_remaining / (len(custom_weights) - 1)
-    
     custom_weights[adj_asset] = new_w
     
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
-    
     risk_free_rate = 0.02 
     c_sharpe = (c_ret - risk_free_rate) / c_vol
     
@@ -199,100 +187,147 @@ if st.session_state.optimized:
     if st.session_state.bench_returns is not None:
         aligned_data = pd.concat([port_daily, st.session_state.bench_returns], axis=1).dropna()
         if len(aligned_data) > 0:
-            p_ret = aligned_data.iloc[:, 0]
-            b_ret = aligned_data.iloc[:, 1]
+            p_ret, b_ret = aligned_data.iloc[:, 0], aligned_data.iloc[:, 1]
             cov_matrix = np.cov(p_ret, b_ret)
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
-            annual_bench_ret = b_ret.mean() * 252
-            c_alpha = c_ret - (risk_free_rate + c_beta * (annual_bench_ret - risk_free_rate))
+            c_alpha = c_ret - (risk_free_rate + c_beta * ((b_ret.mean() * 252) - risk_free_rate))
 
     st.markdown("### Risk & Return Metrics")
-    # RESTORED EXPECTED RETURN TO THE TOP METRICS
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    
     m1.metric("Exp. Return", f"{c_ret*100:.2f}%")
     m2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
     m3.metric("Sortino Ratio", f"{c_sortino:.2f}")
-    
     if not np.isnan(c_beta):
         m4.metric("Beta (β)", f"{c_beta:.2f}")
         m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
     else:
-        m4.metric("Beta (β)", "N/A")
-        m5.metric("Alpha (α)", "N/A")
-        
+        m4.metric("Beta", "N/A"); m5.metric("Alpha", "N/A")
     m6.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
 
     st.markdown("---")
     
-    # --- ASSET ALLOCATION & WEIGHTS SECTION ---
-    st.markdown("### Portfolio Allocation")
-    alloc_col1, alloc_col2, alloc_col3 = st.columns([1, 1, 1.5])
-
-    # 1. Compile Asset Class Totals
-    allocation_totals = {
-        'Cash & Equivalents': 0.0,
-        'Fixed Income': 0.0,
-        'Canadian Equities': 0.0,
-        'US Equities': 0.0,
-        'International Equities': 0.0,
-        'Other': 0.0
-    }
-    
+    st.markdown("### Trade Calculator & Allocation Breakdown")
+    trade_data = []
     for t, w in custom_weights.items():
-        a_class = st.session_state.asset_classes.get(t, 'Other')
-        allocation_totals[a_class] += w
-        
-    alloc_df = pd.DataFrame(list(allocation_totals.items()), columns=['Category', 'Weight'])
-    alloc_df = alloc_df[alloc_df['Weight'] > 0.001].sort_values(by='Weight', ascending=False).reset_index(drop=True)
-
-    with alloc_col1:
-        st.markdown("**By Asset Class**")
-        display_alloc = alloc_df.copy()
-        display_alloc['Weight'] = (display_alloc['Weight'] * 100).round(2).astype(str) + '%'
-        st.dataframe(display_alloc, use_container_width=True)
-
-    with alloc_col2:
-        st.markdown("**By Individual Security**")
-        weights_df = pd.DataFrame.from_dict(custom_weights, orient='index', columns=['Weight'])
-        weights_df = weights_df[weights_df['Weight'] > 0.001].sort_values(by='Weight', ascending=False)
-        display_df = weights_df.copy()
-        display_df['Weight'] = (display_df['Weight'] * 100).round(2).astype(str) + '%'
-        st.dataframe(display_df, use_container_width=True)
-        
-        csv = display_df.to_csv()
-        st.download_button("📥 Download Weights", data=csv, file_name='portfolio_weights.csv', mime='text/csv')
-
-    with alloc_col3:
-        st.markdown("**Allocation Breakdown**")
-        fig_pie, ax_pie = plt.subplots(figsize=(5, 4))
-        ax_pie.pie(alloc_df['Weight'], labels=alloc_df['Category'], autopct='%1.1f%%', startangle=90, 
-                   colors=sns.color_palette("pastel"))
-        ax_pie.axis('equal') 
-        fig_pie.patch.set_alpha(0.0) # Transparent background
-        st.pyplot(fig_pie)
+        if w > 0.001:
+            a_class, a_sector = st.session_state.asset_meta.get(t, ('Other', 'Unknown'))
+            trade_data.append({
+                'Ticker': t, 'Weight': w, 'Dollar Value ($)': w * portfolio_value,
+                'Asset Class': a_class, 'Sector': a_sector
+            })
+            
+    trade_df = pd.DataFrame(trade_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
+    calc_col1, calc_col2 = st.columns([2, 1])
+    with calc_col1:
+        display_trade = trade_df.copy()
+        display_trade['Weight'] = (display_trade['Weight'] * 100).round(2).astype(str) + '%'
+        display_trade['Dollar Value ($)'] = display_trade['Dollar Value ($)'].apply(lambda x: f"${x:,.2f}")
+        st.dataframe(display_trade, use_container_width=True)
+    with calc_col2:
+        sector_totals = trade_df.groupby('Sector')['Weight'].sum()
+        fig_sec, ax_sec = plt.subplots(figsize=(4, 4))
+        ax_sec.pie(sector_totals, labels=sector_totals.index, autopct='%1.1f%%', colors=sns.color_palette("Set3"))
+        fig_sec.patch.set_alpha(0.0)
+        st.pyplot(fig_sec)
 
     st.markdown("---")
     
-    # --- RESTORED CORRELATION MATRIX & EFFICIENT FRONTIER ---
-    chart_col1, chart_col2 = st.columns(2)
+    # --- MONTE CARLO SIMULATION ---
+    st.markdown(f"### Future Projection: Monte Carlo Simulation ({mc_years} Years)")
+    st.markdown(f"Running **{mc_sims}** simulated lifetimes based on your custom portfolio's historical return and volatility.")
     
+    # Monte Carlo Math (Geometric Brownian Motion)
+    np.random.seed(42) # Keeps paths stable when moving sliders
+    dt = 1 # Annual steps for speed and clarity
+    
+    sim_results = np.zeros((mc_sims, mc_years + 1))
+    sim_results[:, 0] = portfolio_value
+    
+    for i in range(mc_sims):
+        Z = np.random.standard_normal(mc_years)
+        # W_t = W_{t-1} * exp((mu - (sigma^2)/2)dt + sigma * sqrt(dt) * Z)
+        growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
+        sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
+        
+    final_values = sim_results[:, -1]
+    median_val = np.percentile(final_values, 50)
+    pct_10 = np.percentile(final_values, 10)
+    pct_90 = np.percentile(final_values, 90)
+    
+    mc_col1, mc_col2 = st.columns([3, 1])
+    
+    with mc_col1:
+        fig_mc, ax_mc = plt.subplots(figsize=(10, 5))
+        # Plot a sample of paths (up to 100) for visual texture
+        for i in range(min(100, mc_sims)):
+            ax_mc.plot(sim_results[i, :], color='gray', alpha=0.1)
+            
+        median_path = np.percentile(sim_results, 50, axis=0)
+        pct_10_path = np.percentile(sim_results, 10, axis=0)
+        pct_90_path = np.percentile(sim_results, 90, axis=0)
+        
+        ax_mc.plot(median_path, color='blue', linewidth=2, label=f'Median: ${median_val:,.0f}')
+        ax_mc.plot(pct_10_path, color='red', linewidth=2, linestyle='--', label=f'10th Percentile (Bear): ${pct_10:,.0f}')
+        ax_mc.plot(pct_90_path, color='green', linewidth=2, linestyle='--', label=f'90th Percentile (Bull): ${pct_90:,.0f}')
+        
+        ax_mc.set_xlim(0, mc_years)
+        ax_mc.set_xlabel("Years into the Future")
+        ax_mc.set_ylabel("Projected Value ($)")
+        ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
+        ax_mc.legend()
+        st.pyplot(fig_mc)
+        
+    with mc_col2:
+        st.markdown("#### Expected Outcomes")
+        st.info(f"**Bull Market (90th Pct):**\n${pct_90:,.2f}")
+        st.success(f"**Median Expectation:**\n${median_val:,.2f}")
+        st.error(f"**Bear Market (10th Pct):**\n${pct_10:,.2f}")
+        st.markdown("*Note: Assumes historical risk/return patterns continue, and does not account for future deposits or inflation.*")
+
+    st.markdown("---")
+    
+    # --- HISTORICAL BACKTESTING ---
+    st.markdown("### Historical Backtest ($10,000 Growth & Drawdowns)")
+    port_wealth = (1 + port_daily).cumprod() * 10000
+    bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
+    rolling_max = port_wealth.cummax()
+    drawdown = (port_wealth - rolling_max) / rolling_max
+    
+    bt_col1, bt_col2 = st.columns(2)
+    with bt_col1:
+        fig_wealth, ax_wealth = plt.subplots(figsize=(8, 5))
+        ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='blue', linewidth=2)
+        if bench_wealth is not None:
+            bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
+            ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark ({benchmark_ticker})", color='gray', alpha=0.7)
+        ax_wealth.set_ylabel("Portfolio Value ($)")
+        ax_wealth.grid(True, linestyle='--', alpha=0.6)
+        ax_wealth.legend()
+        st.pyplot(fig_wealth)
+    with bt_col2:
+        fig_dd, ax_dd = plt.subplots(figsize=(8, 5))
+        ax_dd.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
+        ax_dd.plot(drawdown.index, drawdown, color='red', linewidth=1)
+        ax_dd.set_ylabel("Drawdown (%)")
+        vals = ax_dd.get_yticks()
+        ax_dd.set_yticklabels(['{:,.0%}'.format(x) for x in vals])
+        ax_dd.grid(True, linestyle='--', alpha=0.6)
+        st.pyplot(fig_dd)
+
+    st.markdown("---")
+    
+    st.markdown("### Optimization Charts")
+    chart_col1, chart_col2 = st.columns(2)
     with chart_col1:
-        st.markdown("### Efficient Frontier")
         ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
-        fig, ax = plt.subplots(figsize=(8, 6))
-        plotting.plot_efficient_frontier(ef_plot, ax=ax, show_assets=True)
-        
-        star_label = f"{st.session_state.opt_target} Optimum"
-        ax.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=star_label)
-        ax.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
-        ax.set_title("")
-        ax.legend()
-        st.pyplot(fig)
-        
+        fig_ef, ax_ef = plt.subplots(figsize=(8, 5))
+        plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
+        ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target} Optimum")
+        ax_ef.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
+        ax_ef.legend()
+        st.pyplot(fig_ef)
     with chart_col2:
-        st.markdown("### Asset Correlation Matrix")
-        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        fig_corr, ax_corr = plt.subplots(figsize=(8, 5))
         corr_matrix = st.session_state.daily_returns.corr()
-        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax2, fmt=".2f", cbar=False)
-        st.pyplot(fig2)
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
+        st.pyplot(fig_corr)
