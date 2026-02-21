@@ -5,13 +5,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pypfopt import EfficientFrontier, risk_models, expected_returns, plotting
-import io
 import tempfile
 from fpdf import FPDF
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Pro Portfolio Optimizer", layout="wide", page_icon="📈")
-sns.set_theme(style="whitegrid") # Makes all charts look modern and clean
+sns.set_theme(style="whitegrid")
 
 # --- SECURITY: PASSWORD PROTECTION ---
 def check_password():
@@ -35,16 +34,15 @@ if not check_password():
     st.stop()
 
 # --- PDF GENERATOR FUNCTION ---
-def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fig_ef):
+def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fig_ef, fig_wealth, fig_mc):
     pdf = FPDF()
-    pdf.add_page()
     
-    # Title
+    # --- PAGE 1: Overview & Efficient Frontier ---
+    pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt="Portfolio Optimization & Strategy Report", ln=True, align='C')
     pdf.ln(5)
     
-    # Metrics
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(200, 8, txt="1. Core Performance Metrics", ln=True)
     pdf.set_font("Arial", '', 11)
@@ -56,7 +54,6 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fi
     pdf.cell(100, 8, txt=f"Beta: {beta:.2f}" if not np.isnan(beta) else "Beta: N/A", ln=True)
     pdf.ln(5)
     
-    # Weights
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(200, 8, txt="2. Target Asset Allocation", ln=True)
     pdf.set_font("Arial", '', 11)
@@ -65,16 +62,32 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fi
             pdf.cell(200, 6, txt=f"{ticker}: {weight*100:.2f}%", ln=True)
     pdf.ln(5)
     
-    # Chart
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(200, 8, txt="3. Efficient Frontier Profile", ln=True)
     
-    # Save matplotlib figure to a temporary image file to embed in PDF
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-        fig_ef.savefig(tmpfile.name, format="png", bbox_inches="tight", dpi=150)
-        pdf.image(tmpfile.name, x=15, w=180)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_ef:
+        fig_ef.savefig(tmp_ef.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_ef.name, x=15, w=180)
+
+    # --- PAGE 2: Backtest & Forecast ---
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="4. Historical Backtest ($10,000 Growth vs Benchmark)", ln=True)
+    
+    current_y = pdf.get_y()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_wealth:
+        fig_wealth.savefig(tmp_wealth.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_wealth.name, x=15, y=current_y, w=180)
         
-    # Output to bytes
+    pdf.set_y(current_y + 115) # Move cursor below the first image
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="5. Monte Carlo Forecast", ln=True)
+    current_y2 = pdf.get_y()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_mc:
+        fig_mc.savefig(tmp_mc.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_mc.name, x=15, y=current_y2, w=180)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
         pdf.output(tmp_pdf.name)
         with open(tmp_pdf.name, "rb") as f:
@@ -110,7 +123,7 @@ def get_asset_metadata(ticker):
 # --- APP HEADER ---
 # ==========================================
 st.title("📈 Pro Portfolio Optimizer & Forecaster")
-st.markdown("Optimize allocations, forecast performance, and generate execution reports.")
+st.markdown("Optimize allocations, forecast performance, and generate execution reports. Created by Nizar.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
@@ -246,46 +259,82 @@ if st.session_state.optimized:
     st.markdown("---")
 
     # ==========================================
+    # --- PRE-GENERATE CHARTS FOR PDF ---
+    # ==========================================
+    # 1. Efficient Frontier
+    ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
+    fig_ef, ax_ef = plt.subplots(figsize=(6, 4))
+    plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
+    ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target}")
+    ax_ef.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
+    ax_ef.set_title("Efficient Frontier Profile")
+    ax_ef.legend()
+
+    # 2. Historical Backtest
+    port_wealth = (1 + port_daily).cumprod() * 10000
+    bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
+    fig_wealth, ax_wealth = plt.subplots(figsize=(7, 4))
+    ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='#1f77b4', linewidth=2)
+    if bench_wealth is not None:
+        bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
+        ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark", color='gray', alpha=0.7)
+    ax_wealth.set_ylabel("Portfolio Value ($)")
+    ax_wealth.legend()
+
+    # 3. Monte Carlo Simulation
+    np.random.seed(42)
+    dt = 1
+    sim_results = np.zeros((int(mc_sims), mc_years + 1))
+    sim_results[:, 0] = portfolio_value
+    for i in range(int(mc_sims)):
+        Z = np.random.standard_normal(mc_years)
+        growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
+        sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
+        
+    final_values = sim_results[:, -1]
+    median_val = np.percentile(final_values, 50)
+    pct_10, pct_90 = np.percentile(final_values, 10), np.percentile(final_values, 90)
+    
+    fig_mc, ax_mc = plt.subplots(figsize=(8, 4))
+    for i in range(min(100, int(mc_sims))): ax_mc.plot(sim_results[i, :], color='gray', alpha=0.1)
+    ax_mc.plot(np.percentile(sim_results, 50, axis=0), color='#1f77b4', linewidth=2, label=f'Median: ${median_val:,.0f}')
+    ax_mc.plot(np.percentile(sim_results, 10, axis=0), color='#d62728', linewidth=2, linestyle='--', label=f'Bear (10%): ${pct_10:,.0f}')
+    ax_mc.plot(np.percentile(sim_results, 90, axis=0), color='#2ca02c', linewidth=2, linestyle='--', label=f'Bull (90%): ${pct_90:,.0f}')
+    ax_mc.set_xlim(0, mc_years)
+    ax_mc.set_ylabel("Projected Value ($)")
+    ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
+    ax_mc.legend()
+
+    # --- PDF DOWNLOAD BUTTON (Now has access to all charts) ---
+    st.markdown("### 📄 Export Strategy")
+    pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, fig_ef, fig_wealth, fig_mc)
+    st.download_button(
+        label="Download Comprehensive PDF Report",
+        data=pdf_bytes,
+        file_name="Complete_Portfolio_Report.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
+    st.markdown("---")
+
+    # ==========================================
     # --- PRO TAPPED NAVIGATION ---
     # ==========================================
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio & Optimization", "💱 Trade Calculator", "📈 Historical Backtest", "🔮 Monte Carlo Forecast"])
 
     with tab1:
-        st.markdown("### Asset Allocation & Efficient Frontier")
-        
         col_charts1, col_charts2 = st.columns([1, 1])
-        
-        # We generate the figure here so we can pass it to the PDF function later
-        ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
-        fig_ef, ax_ef = plt.subplots(figsize=(6, 4))
-        plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
-        ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target}")
-        ax_ef.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
-        ax_ef.set_title("Efficient Frontier Profile")
-        ax_ef.legend()
-        
         with col_charts1:
+            st.markdown("**Efficient Frontier**")
             st.pyplot(fig_ef)
-            
-            # PDF DOWNLOAD BUTTON
-            pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, fig_ef)
-            st.download_button(
-                label="📄 Download Professional PDF Report",
-                data=pdf_bytes,
-                file_name="Portfolio_Report.pdf",
-                mime="application/pdf",
-                type="primary"
-            )
-
         with col_charts2:
+            st.markdown("**Asset Correlation Matrix**")
             fig_corr, ax_corr = plt.subplots(figsize=(6, 4))
             corr_matrix = st.session_state.daily_returns.corr()
             sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
-            ax_corr.set_title("Asset Correlation Matrix")
             st.pyplot(fig_corr)
 
     with tab2:
-        st.markdown("### Execution Plan & Breakdown")
         trade_data = []
         for t, w in custom_weights.items():
             if w > 0.001:
@@ -311,23 +360,14 @@ if st.session_state.optimized:
             st.pyplot(fig_sec)
 
     with tab3:
-        st.markdown("### Historical $10k Growth & Drawdowns")
-        port_wealth = (1 + port_daily).cumprod() * 10000
-        bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
-        rolling_max = port_wealth.cummax()
-        drawdown = (port_wealth - rolling_max) / rolling_max
-        
         bt_col1, bt_col2 = st.columns(2)
         with bt_col1:
-            fig_wealth, ax_wealth = plt.subplots(figsize=(7, 4))
-            ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='#1f77b4', linewidth=2)
-            if bench_wealth is not None:
-                bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
-                ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark", color='gray', alpha=0.7)
-            ax_wealth.set_ylabel("Portfolio Value ($)")
-            ax_wealth.legend()
+            st.markdown("**$10,000 Growth vs Benchmark**")
             st.pyplot(fig_wealth)
         with bt_col2:
+            st.markdown("**Historical Drawdowns**")
+            rolling_max = port_wealth.cummax()
+            drawdown = (port_wealth - rolling_max) / rolling_max
             fig_dd, ax_dd = plt.subplots(figsize=(7, 4))
             ax_dd.fill_between(drawdown.index, drawdown, 0, color='#d62728', alpha=0.3)
             ax_dd.plot(drawdown.index, drawdown, color='#d62728', linewidth=1)
@@ -336,40 +376,24 @@ if st.session_state.optimized:
             st.pyplot(fig_dd)
 
     with tab4:
-        st.markdown(f"### Monte Carlo Projection ({mc_years} Years | {mc_sims} Sims)")
-        np.random.seed(42)
-        dt = 1
-        sim_results = np.zeros((int(mc_sims), mc_years + 1))
-        sim_results[:, 0] = portfolio_value
-        
-        for i in range(int(mc_sims)):
-            Z = np.random.standard_normal(mc_years)
-            growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
-            sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
-            
-        final_values = sim_results[:, -1]
-        median_val = np.percentile(final_values, 50)
-        pct_10, pct_90 = np.percentile(final_values, 10), np.percentile(final_values, 90)
-        
         mc_col1, mc_col2 = st.columns([3, 1])
         with mc_col1:
-            fig_mc, ax_mc = plt.subplots(figsize=(8, 4))
-            for i in range(min(100, int(mc_sims))): ax_mc.plot(sim_results[i, :], color='gray', alpha=0.1)
-            ax_mc.plot(np.percentile(sim_results, 50, axis=0), color='#1f77b4', linewidth=2, label=f'Median: ${median_val:,.0f}')
-            ax_mc.plot(np.percentile(sim_results, 10, axis=0), color='#d62728', linewidth=2, linestyle='--', label=f'Bear (10%): ${pct_10:,.0f}')
-            ax_mc.plot(np.percentile(sim_results, 90, axis=0), color='#2ca02c', linewidth=2, linestyle='--', label=f'Bull (90%): ${pct_90:,.0f}')
-            ax_mc.set_xlim(0, mc_years)
-            ax_mc.set_ylabel("Projected Value ($)")
-            ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
-            ax_mc.legend()
+            st.markdown(f"**Projected Value ({mc_years} Years)**")
             st.pyplot(fig_mc)
-            
         with mc_col2:
-            st.info(f"**Bull Market:**\n${pct_90:,.2f}")
-            st.success(f"**Median:**\n${median_val:,.2f}")
-            st.error(f"**Bear Market:**\n${pct_10:,.2f}")
+            st.info(f"**Bull Market (90th Pct):**\n${pct_90:,.2f}")
+            st.success(f"**Median Expectation:**\n${median_val:,.2f}")
+            st.error(f"**Bear Market (10th Pct):**\n${pct_10:,.2f}")
 
-    # --- LEGAL DISCLAIMER ---
+  # --- LEGAL DISCLAIMER ---
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
-        st.caption("""**Informational Purposes Only:** This app is for educational purposes and does not constitute financial advice. **Use at Your Own Risk:** The creator accepts no liability for investment decisions made using this tool. Past performance is not indicative of future results.""")
+        st.caption("""
+        **Informational Purposes Only:** This application is provided for educational and informational purposes only. It does not constitute financial, investment, legal, or tax advice. 
+        
+        **No Guarantee of Accuracy:** The pricing data and asset metadata are sourced from free public APIs (Yahoo Finance) which may contain errors, omissions, or delays. The creator of this tool makes no representations or warranties regarding the accuracy or completeness of the data.
+        
+        **Inherent Risks:** Financial markets are volatile. The "Optimal" portfolios, Sharpe Ratios, and Monte Carlo forecasts are based purely on historical mathematical models. **Past performance is not indicative of future results.** The projections do not account for trading fees, slippage, taxes, or future market shocks. 
+        
+        **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
+        """)
