@@ -43,6 +43,8 @@ def get_asset_metadata(ticker):
         country = info.get('country', 'Unknown').upper()
         category = info.get('category', '').upper()
         sector_info = info.get('sector', '')
+        long_name = (info.get('longName') or '').upper()
+        summary = (info.get('longBusinessSummary') or '').upper()
         
         div_yield = info.get('trailingAnnualDividendYield', info.get('dividendYield', 0.0))
         if div_yield is None: div_yield = 0.0
@@ -53,12 +55,23 @@ def get_asset_metadata(ticker):
         if sector_info: sector = sector_info
         elif category: sector = category.title()
 
+        # SMART TEXT SCANNER FOR LAZY ETF METADATA
+        is_fixed_income = any(word in long_name for word in ['BOND', 'FIXED INCOME', 'TREASURY', 'DEBT', 'YIELD']) or \
+                          any(word in category for word in ['BOND', 'FIXED'])
+        is_cash = any(word in category for word in ['MONEY', 'CASH']) or 'CASH' in long_name
+
         if q_type in ['MUTUALFUND', 'ETF']:
-            if 'BOND' in category or 'FIXED' in category: asset_class = 'Fixed Income'
-            elif 'MONEY' in category or 'CASH' in category: asset_class = 'Cash & Equivalents'
-            elif 'CANADA' in category or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
-            elif 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: asset_class = 'International Equities'
-            else: asset_class = 'US Equities' 
+            if is_fixed_income: 
+                asset_class = 'Fixed Income'
+                sector = 'Bonds'
+            elif is_cash: 
+                asset_class = 'Cash & Equivalents'
+            elif 'CANADA' in category or 'CANADA' in long_name or ticker.endswith('.TO'): 
+                asset_class = 'Canadian Equities'
+            elif 'FOREIGN' in category or 'EMERGING' in category or 'INTERNATIONAL' in category: 
+                asset_class = 'International Equities'
+            else: 
+                asset_class = 'US Equities' 
         else:
             if country == 'CANADA' or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
             elif country == 'UNITED STATES': asset_class = 'US Equities'
@@ -242,6 +255,9 @@ if optimize_button:
             
         fetch_start = min(start_date, pd.to_datetime("2020-01-01"))
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
+        
+        # Clear the old cache to force a re-scrape with our new "Bond" scanner logic
+        get_asset_metadata.clear()
         st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
         
         if st.session_state.full_historical_data.empty: 
@@ -397,12 +413,22 @@ if st.session_state.optimized:
     proj_income = port_yield * portfolio_value
 
     st.markdown("### Risk, Return & Income")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    
+    # --- RESTORED METRICS BOARD ---
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Exp. Return", f"{c_ret*100:.2f}%")
     m2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
-    m3.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
-    m4.metric("Dividend Yield", f"{port_yield*100:.2f}%")
-    m5.metric("Annual Income", f"${proj_income:,.2f}")
+    m3.metric("Sortino Ratio", f"{c_sortino:.2f}")
+    m4.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
+    
+    m5, m6, m7, m8 = st.columns(4)
+    if not np.isnan(c_alpha):
+        m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
+        m6.metric("Beta (β)", f"{c_beta:.2f}")
+    else:
+        m5.metric("Alpha", "N/A"); m6.metric("Beta", "N/A")
+    m7.metric("Dividend Yield", f"{port_yield*100:.2f}%")
+    m8.metric("Annual Income", f"${proj_income:,.2f}")
     
     if st.session_state.autobench:
         st.caption(f"**Current Benchmark Blend:** " + ", ".join([f"{BENCH_MAP[k]} ({v*100:.1f}%)" for k,v in ac_weights.items() if v > 0.01]))
@@ -480,16 +506,37 @@ if st.session_state.optimized:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Optimization", "⚖️ Rebalancing Engine", "📉 Stress Tests", "📈 Backtest", "🔮 Monte Carlo"])
 
     with tab1:
-        col_charts1, col_charts2 = st.columns([1, 1])
-        with col_charts1:
-            st.markdown("**Efficient Frontier**")
-            st.pyplot(fig_ef)
-        with col_charts2:
+        # --- RESTORED PIE CHARTS & ALLOCATION ---
+        st.markdown("**Asset Allocation & Sector Exposure**")
+        ac_totals = {}
+        sec_totals = {}
+        for t, w in custom_weights.items():
+            if w > 0.001:
+                meta = st.session_state.asset_meta.get(t, ('Other', 'Unknown', 0.0, 1e9))
+                ac_totals[meta[0]] = ac_totals.get(meta[0], 0) + w
+                sec_totals[meta[1]] = sec_totals.get(meta[1], 0) + w
+                
+        pie_col1, pie_col2, pie_col3 = st.columns([1, 1, 1])
+        with pie_col1:
+            fig_ac, ax_ac = plt.subplots(figsize=(4, 4))
+            ax_ac.pie(ac_totals.values(), labels=ac_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("pastel"))
+            ax_ac.set_title("Asset Class")
+            st.pyplot(fig_ac)
+        with pie_col2:
+            fig_sec, ax_sec = plt.subplots(figsize=(4, 4))
+            ax_sec.pie(sec_totals.values(), labels=sec_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("muted"))
+            ax_sec.set_title("Sector Exposure")
+            st.pyplot(fig_sec)
+        with pie_col3:
             st.markdown("**Asset Correlation Matrix**")
-            fig_corr, ax_corr = plt.subplots(figsize=(6, 4))
+            fig_corr, ax_corr = plt.subplots(figsize=(4, 4))
             corr_matrix = st.session_state.daily_returns.corr()
-            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False)
+            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False, annot_kws={"size": 8})
             st.pyplot(fig_corr)
+            
+        st.markdown("---")
+        st.markdown("**Efficient Frontier**")
+        st.pyplot(fig_ef)
 
     with tab2:
         st.markdown("### Actionable Rebalancing Plan")
