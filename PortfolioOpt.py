@@ -177,32 +177,32 @@ st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
 bl_views_input = ""
 # --- BLACK-LITTERMAN LOGIC ---
-        if use_bl:
-            from pypfopt import black_litterman, BlackLittermanModel
-            views_dict = {}
-            if bl_views_input.strip():
-                for item in bl_views_input.split(','):
-                    if ':' in item:
-                        t, v = item.split(':')
-                        try: views_dict[t.strip().upper()] = float(v.strip())
-                        except ValueError: pass
+if use_bl:
+    from pypfopt import black_litterman, BlackLittermanModel
+    views_dict = {}
+    if bl_views_input.strip():
+        for item in bl_views_input.split(','):
+            if ':' in item:
+                t, v = item.split(':')
+                try: views_dict[t.strip().upper()] = float(v.strip())
+                except ValueError: pass
             
-            mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
-            try: delta = black_litterman.market_implied_risk_aversion(bench_data)
-            except Exception: delta = 2.5
+    mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
+    try: delta = black_litterman.market_implied_risk_aversion(bench_data)
+    except Exception: delta = 2.5
                 
-            market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
+    market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
             
-            if views_dict:
-                bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
-                mu = bl.bl_returns()
-                S = bl.bl_cov()
-            else:
-                mu = market_prior
+    if views_dict:
+        bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
+        mu = bl.bl_returns()
+        S = bl.bl_cov()
+    else:
+        mu = market_prior
                 
-            st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
-        else:
-            st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
+    st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
+else:
+    st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
 st.sidebar.header("5. Trade & Forecast")
 portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", min_value=1000, value=100000, step=1000)
 mc_years = st.sidebar.slider("Monte Carlo Years", 1, 30, 10)
