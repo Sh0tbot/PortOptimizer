@@ -622,9 +622,31 @@ if st.session_state.optimized:
             st.pyplot(fig_sec, use_container_width=True, clear_figure=True)
         with pie_col3:
             st.markdown("**Asset Correlation Matrix**")
-            fig_corr, ax_corr = plt.subplots(figsize=(7, 6))
             corr_matrix = st.session_state.daily_returns.corr()
-            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=False, annot_kws={"size": 10})
+            num_assets = len(corr_matrix.columns)
+            
+            # DYNAMIC RENDERING: Scale font sizes and toggle numbers based on asset count
+            show_numbers = num_assets <= 12
+            font_size = max(6, 10 - (num_assets // 8))
+            
+            fig_corr, ax_corr = plt.subplots(figsize=(7, 6))
+            sns.heatmap(
+                corr_matrix, 
+                annot=show_numbers, 
+                cmap='coolwarm', 
+                vmin=-1, vmax=1, 
+                ax=ax_corr, 
+                fmt=".2f", 
+                cbar=not show_numbers, # Turn on color legend if numbers are hidden
+                annot_kws={"size": 9},
+                xticklabels=True, 
+                yticklabels=True
+            )
+            
+            # Rotate labels so ticker symbols don't crash into each other
+            ax_corr.tick_params(axis='x', rotation=90, labelsize=font_size)
+            ax_corr.tick_params(axis='y', rotation=0, labelsize=font_size)
+            
             st.pyplot(fig_corr, use_container_width=True, clear_figure=True)
             
         st.markdown("---")
