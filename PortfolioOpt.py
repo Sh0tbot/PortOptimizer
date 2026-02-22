@@ -53,8 +53,18 @@ def get_asset_metadata(ticker):
         sector_info = info.get('sector', '')
         long_name = (info.get('longName') or '').upper()
         
+        # --- SMART DIVIDEND YIELD RECALCULATOR ---
         div_yield = info.get('trailingAnnualDividendYield', info.get('dividendYield', 0.0))
         if div_yield is None: div_yield = 0.0
+        
+        # If yield > 20%, YF likely passed the raw Dollar amount instead of the %
+        if div_yield > 0.20:
+            div_rate = info.get('trailingAnnualDividendRate', info.get('dividendRate', div_yield))
+            price = info.get('previousClose', info.get('currentPrice', info.get('regularMarketPreviousClose', 0.0)))
+            if div_rate and price and price > 0:
+                div_yield = div_rate / price # Manually calculate true yield
+            else:
+                div_yield = 0.0 # Absolute fallback to prevent broken math
         
         mcap = info.get('marketCap', info.get('totalAssets', 1e9))
         if mcap is None: mcap = 1e9
@@ -196,7 +206,7 @@ else:
 
 st.sidebar.header("3. Strategy Settings")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
-max_w = st.sidebar.slider("Max Weight per Asset", 5, 100, 100, 5) / 100.0
+max_w = st.sidebar.slider("Max Weight per Asset", 5, 100, 100, 1) / 100.0
 
 st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
@@ -452,7 +462,6 @@ if st.session_state.optimized:
 
     st.markdown("---")
     
-    # --- REDESIGNED COMPARATIVE KPI DASHBOARD ---
     if st.session_state.imported_weights:
         st.markdown("### 📊 Target vs Current Portfolio Performance")
         
@@ -474,7 +483,6 @@ if st.session_state.optimized:
             t1.metric("Sharpe Ratio", f"{c_sharpe:.2f}", f"{c_sharpe - curr_sharpe:.2f}", delta_color="normal")
             t1.metric("Dividend Yield", f"{port_yield*100:.2f}%", f"{(port_yield - curr_yield)*100:.2f}%", delta_color="normal")
             
-            # Risk improvement is visually inverted (lower risk displays green)
             t2.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%", f"{(c_vol - curr_vol)*100:.2f}%", delta_color="inverse")
             t2.metric("Sortino Ratio", f"{c_sortino:.2f}", f"{c_sortino - curr_sortino:.2f}", delta_color="normal")
             t2.metric("Annual Income", f"${proj_income:,.2f}", f"${proj_income - curr_income:,.2f}", delta_color="normal")
@@ -634,7 +642,6 @@ if st.session_state.optimized:
         st.markdown("<br>", unsafe_allow_html=True)
         rebal_data = []
         
-        # Pull ALL relevant assets so we can tell the user to sell positions dropped to 0%
         all_relevant = set([t for t, w in custom_weights.items() if w > 0.0001])
         if st.session_state.imported_weights:
             all_relevant.update([t for t, w in st.session_state.imported_weights.items() if w > 0.0001])
