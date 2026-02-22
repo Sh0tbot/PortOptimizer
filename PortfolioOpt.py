@@ -167,38 +167,59 @@ if optimize_button:
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
 
-    with st.spinner("Downloading market data and categorizing assets..."):
-        raw_data = yf.download(all_tickers, start=start_date, end=end_date)
-        st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
+with st.spinner("Validating symbols and downloading market data..."):
         
-        if raw_data.empty: st.error("No data found."); st.stop()
-        try: data = raw_data['Adj Close']
-        except KeyError:
-            try: data = raw_data['Close']
-            except KeyError: st.error("Pricing columns not found."); st.stop()
-
-        if isinstance(data, pd.Series): data = data.to_frame()
-        
-        # --- NEW: DETECT INVALID TICKERS ---
-        # Scan for tickers that returned completely blank columns
-        invalid_tickers = [t for t in tickers if t not in data.columns or data[t].isna().all()]
-        
+        # --- THE BULLETPROOF INVALID TICKER CHECK ---
+        invalid_tickers = []
+        for t in all_tickers:
+            # A quick 1-month history check is the most reliable way to see if a ticker is real and actively trading
+            if yf.Ticker(t).history(period="1mo").empty:
+                invalid_tickers.append(t)
+                
         if invalid_tickers:
             st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**")
             st.warning("Please check your spelling (remember to append '.TO' for Canadian funds) and try again.")
             st.stop()
+            
+        # --- IF ALL VALID, PROCEED WITH BULK DOWNLOAD ---
+        fetch_start = min(start_date, pd.to_datetime("2020-01-01"))
+        st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
+        st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
+        
+        if st.session_state.full_historical_data.empty: 
+            st.error("No data found.")
+            st.stop()
+        
+        raw_data = st.session_state.full_historical_data
+        try: 
+            data = raw_data['Adj Close']
+        except KeyError:
+            try: 
+                data = raw_data['Close']
+            except KeyError: 
+                st.error("Pricing columns not found.")
+                st.stop()
 
-        # Clean the remaining valid data
+        if isinstance(data, pd.Series): 
+            data = data.to_frame()
+            # If duplicates resulted in only 1 unique ticker, name the column properly
+            if len(all_tickers) == 1:
+                data.columns = [all_tickers[0]]
+
+        # Clean the valid data
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         
-        if bench_clean in data.columns:
-            bench_data = data[bench_clean]
-            port_data = data.drop(columns=[bench_clean], errors='ignore')
+        # Subset data for optimization based on user's selected time horizon
+        opt_data = data.loc[start_date:end_date]
+        
+        if bench_clean in opt_data.columns:
+            bench_data = opt_data[bench_clean]
+            port_data = opt_data.drop(columns=[bench_clean], errors='ignore')
         else:
             bench_data = pd.Series(dtype=float)
-            port_data = data
-
-    # THE MISSING SAFETY CHECK
+            port_data = opt_data
+            
+        # THE SAFETY CHECK
         if port_data.empty or len(port_data) < 2:
             st.error("Not enough trading days in this specific Time Range. Try selecting a longer Time Horizon.")
             st.stop()
@@ -206,8 +227,6 @@ if optimize_button:
         if port_data.shape[1] < 2:
             st.error("Not enough valid assets in this Time Range. At least 2 assets are required to optimize.")
             st.stop()
-
-    with st.spinner("Crunching the math..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
         ef = EfficientFrontier(mu, S, weight_bounds=(0, max_w))
@@ -417,6 +436,7 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
 
 
