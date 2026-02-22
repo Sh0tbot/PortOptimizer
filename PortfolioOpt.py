@@ -15,17 +15,8 @@ sns.set_theme(style="whitegrid", rc={"figure.dpi": 300, "axes.spines.top": False
 # --- CUSTOM CSS FOR SAAS AESTHETIC ---
 st.markdown("""
 <style>
-    /* Clean up the metric cards */
-    [data-testid="stMetricValue"] {
-        font-size: 1.8rem;
-        color: #1f77b4;
-    }
-    /* Subtle padding for containers */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
-    /* Hide Streamlit branding */
+    [data-testid="stMetricValue"] { font-size: 1.8rem; color: #1f77b4; }
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
@@ -121,12 +112,12 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
     
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(200, 8, txt=f"2. Historical Scenario Analysis ({bench_label})", ln=True)
-    pdf.set_font("Arial", 'B', 10)
+    pdf.set_font("Arial", 'B', 9)
     pdf.cell(80, 8, "Historical Event", border=1, align='C')
     pdf.cell(55, 8, "Portfolio Return", border=1, align='C')
     pdf.cell(55, 8, "Benchmark Return", border=1, align='C')
     pdf.ln()
-    pdf.set_font("Arial", '', 10)
+    pdf.set_font("Arial", '', 9)
     for res in stress_results:
         pdf.cell(80, 8, res['Event'], border=1)
         pdf.cell(55, 8, f"{res['Portfolio Return']*100:.2f}%" if pd.notnull(res['Portfolio Return']) else "N/A", border=1, align='C')
@@ -203,10 +194,17 @@ if autobench:
 else:
     benchmark_ticker = st.sidebar.text_input("Static Benchmark:", "SPY")
 
+# --- CUSTOM DATE RANGE FEATURE ---
 st.sidebar.header("2. Historical Horizon")
-time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years"), index=2)
-end_date = pd.Timestamp.today()
-start_date = end_date - pd.DateOffset(years=int(time_range.split()[0]))
+time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years", "Custom Dates"), index=2)
+
+if time_range == "Custom Dates":
+    col_d1, col_d2 = st.sidebar.columns(2)
+    with col_d1: start_date = pd.to_datetime(st.date_input("Start Date", pd.Timestamp.today() - pd.DateOffset(years=5)))
+    with col_d2: end_date = pd.to_datetime(st.date_input("End Date", pd.Timestamp.today()))
+else:
+    end_date = pd.Timestamp.today()
+    start_date = end_date - pd.DateOffset(years=int(time_range.split()[0]))
 
 st.sidebar.header("3. Strategy Settings")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
@@ -240,6 +238,8 @@ if optimize_button:
     if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
     if max_w < (1.0 / len(tickers)): st.error("Constraint mathematically impossible."); st.stop()
         
+    if start_date >= end_date: st.error("Start date must be before end date."); st.stop()
+        
     bench_clean = benchmark_ticker.strip().upper()
     
     if autobench: all_tickers = list(set(tickers + list(BENCH_MAP.values())))
@@ -253,7 +253,8 @@ if optimize_button:
         if invalid_tickers:
             st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**"); st.stop()
             
-        fetch_start = min(start_date, pd.to_datetime("2020-01-01"))
+        # FORCE DEEP DOWNLOAD FOR STRESS TESTS (Back to 2007 for GFC)
+        fetch_start = min(start_date, pd.to_datetime("2007-01-01"))
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
         
         get_asset_metadata.clear()
@@ -272,6 +273,8 @@ if optimize_button:
             if len(all_tickers) == 1: data.columns = [all_tickers[0]]
 
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
+        
+        # ISOLATE OPTIMIZATION DATA TO USER DATE RANGE
         opt_data = data.loc[start_date:end_date]
         
         valid_tickers = [t for t in tickers if t in opt_data.columns]
@@ -286,7 +289,7 @@ if optimize_button:
             bench_data = pd.Series(dtype=float)
             
         if port_data.empty or len(port_data) < 2:
-            st.error("Not enough trading days/assets in this Time Range."); st.stop()
+            st.error("Not enough trading days/assets in this Time Range. Try a different date range."); st.stop()
 
     with st.spinner("Crunching optimization matrices..."):
         mu = expected_returns.mean_historical_return(port_data)
@@ -336,7 +339,6 @@ if optimize_button:
 if st.session_state.optimized:
     st.markdown("---")
     
-    # --- 1. INTERACTIVE OVERRIDE SECTION ---
     with st.container():
         st.subheader(f"🎛️ Adjust Allocation ({st.session_state.opt_target} Baseline)")
         adj_col1, adj_col2 = st.columns([1, 2])
@@ -356,7 +358,6 @@ if st.session_state.optimized:
                 else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
         custom_weights[adj_asset] = new_w
     
-    # MATH ENGINE RUN
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -406,7 +407,6 @@ if st.session_state.optimized:
 
     st.markdown("---")
     
-    # --- 2. THE KPI DASHBOARD ---
     st.markdown("### 📊 Strategy Performance Overview")
     kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
     kpi_col1.metric("Exp. Return", f"{c_ret*100:.2f}%")
@@ -426,9 +426,8 @@ if st.session_state.optimized:
     if st.session_state.autobench:
         st.caption(f"**Current Benchmark Blend:** " + ", ".join([f"{BENCH_MAP[k]} ({v*100:.1f}%)" for k,v in ac_weights.items() if v > 0.01]))
     
-    st.markdown("<br>", unsafe_allow_html=True) # Spacer
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- PRE-COMPUTE CHARTS FOR RESPONSIVENESS ---
     ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
     fig_ef, ax_ef = plt.subplots(figsize=(10, 5))
     plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
@@ -470,9 +469,12 @@ if st.session_state.optimized:
     ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
     ax_mc.legend()
 
+    # --- EXPANDED STRESS TESTS ---
     stress_events = {
-        "COVID-19 Crash (Feb-Mar 2020)": ("2020-02-19", "2020-03-23"),
-        "2022 Bear Market (Jan-Oct 2022)": ("2022-01-03", "2022-10-12")
+        "2008 Financial Crisis (Oct '07 - Mar '09)": ("2007-10-09", "2009-03-09"),
+        "2018 Q4 Selloff (Sep '18 - Dec '18)": ("2018-09-20", "2018-12-24"),
+        "COVID-19 Crash (Feb - Mar 2020)": ("2020-02-19", "2020-03-23"),
+        "2022 Bear Market (Jan - Oct 2022)": ("2022-01-03", "2022-10-12")
     }
     stress_results = []
     hist_data = st.session_state.stress_data
@@ -497,7 +499,6 @@ if st.session_state.optimized:
                 stress_results.append({'Event': event_name, 'Portfolio Return': np.nan, 'Benchmark Return': np.nan})
         except Exception: pass
 
-    # --- 3. THE DEEP DIVE TABS ---
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Allocation & Risk", "⚖️ Rebalancing", "📉 Stress Tests", "📈 Backtest", "🔮 Monte Carlo"])
 
     with tab1:
