@@ -268,25 +268,55 @@ if optimize_button:
     if autobench: all_tickers = list(set(tickers + list(BENCH_MAP.values())))
     else: all_tickers = list(set(tickers + [bench_clean]))
 
-    with st.spinner("Validating symbols and downloading market data..."):
+with st.spinner("Validating symbols and auto-correcting exchanges..."):
         invalid_tickers = []
+        corrected_tickers = {}
+        
         for t in all_tickers:
-            if yf.Ticker(t).history(period="1mo").empty: invalid_tickers.append(t)
+            if yf.Ticker(t).history(period="1mo").empty: 
+                # AUTO-CORRECT: If TSX (.TO) fails, try NEO Exchange (.NE)
+                if t.endswith('.TO'):
+                    ne_t = t.replace('.TO', '.NE')
+                    if not yf.Ticker(ne_t).history(period="1mo").empty:
+                        corrected_tickers[t] = ne_t
+                        continue
+                invalid_tickers.append(t)
                 
+        # APPLY NEO EXCHANGE CORRECTIONS
+        if corrected_tickers:
+            st.toast(f"🔄 Auto-corrected NEO Exchange ETFs: {', '.join([f'{k} → {v}' for k,v in corrected_tickers.items()])}")
+            all_tickers = [corrected_tickers.get(t, t) for t in all_tickers]
+            tickers = [corrected_tickers.get(t, t) for t in tickers]
+            if st.session_state.imported_weights:
+                for old_t, new_t in corrected_tickers.items():
+                    if old_t in st.session_state.imported_weights:
+                        st.session_state.imported_weights[new_t] = st.session_state.imported_weights.pop(old_t)
+                
+        # HANDLE REMAINING INVALID TICKERS (Like Mutual Funds)
         if invalid_tickers:
-            # Drop invalid tickers but keep the app running for comparative analysis
-            st.warning(f"⚠️ Omitting unreadable or delisted symbols: **{', '.join(invalid_tickers)}**")
+            mf_suspects = [t for t in invalid_tickers if len(t) >= 5 and any(c.isdigit() for c in t)]
+            if mf_suspects:
+                st.warning(f"⚠️ **Canadian Mutual Funds Detected:** {', '.join(mf_suspects)}")
+                st.caption("Free APIs do not track Canadian Mutual Funds. Please replace them with Proxy ETFs (e.g., use `XBB.TO` for a Bond Fund) in your CSV and re-upload.")
+            
+            other_invalid = [t for t in invalid_tickers if t not in mf_suspects]
+            if other_invalid:
+                st.warning(f"⚠️ Omitting unreadable or delisted symbols: **{', '.join(other_invalid)}**")
+            
+            # Drop them but keep the app running for comparative analysis
             all_tickers = [t for t in all_tickers if t not in invalid_tickers]
             tickers = [t for t in tickers if t not in invalid_tickers]
             
-            # Rebalance imported weights to 100% after dropping bad symbols
             if st.session_state.imported_weights:
                 for t in invalid_tickers: st.session_state.imported_weights.pop(t, None)
                 tot_w = sum(st.session_state.imported_weights.values())
                 if tot_w > 0: st.session_state.imported_weights = {k: v/tot_w for k,v in st.session_state.imported_weights.items()}
 
-        if len(tickers) < 2: st.error("Not enough valid tickers remaining."); st.stop()
+        if len(tickers) < 2: 
+            st.error("Not enough valid tickers remaining to optimize.")
+            st.stop()
             
+        # FORCE DEEP DOWNLOAD FOR STRESS TESTS (Back to 2007 for GFC)
         fetch_start = min(start_date, pd.to_datetime("2007-01-01"))
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
         
