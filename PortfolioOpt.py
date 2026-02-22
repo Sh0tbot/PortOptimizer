@@ -352,7 +352,7 @@ if st.session_state.optimized:
         proxy_returns = st.session_state.proxy_data.pct_change().dropna()
         aligned_proxies = proxy_returns.reindex(port_daily.index).fillna(0)
         
-bench_daily = pd.Series(0.0, index=port_daily.index)
+    bench_daily = pd.Series(0.0, index=port_daily.index)
         for ac, w in ac_weights.items():
             if w > 0:
                 proxy_ticker = BENCH_MAP[ac]
