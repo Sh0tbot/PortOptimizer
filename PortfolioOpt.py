@@ -177,7 +177,7 @@ if optimize_button:
             try: data = raw_data['Close']
             except KeyError: st.error("Pricing columns not found."); st.stop()
 
-if isinstance(data, pd.Series): data = data.to_frame()
+        if isinstance(data, pd.Series): data = data.to_frame()
         
         # --- NEW: DETECT INVALID TICKERS ---
         # Scan for tickers that returned completely blank columns
@@ -417,5 +417,6 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
 
