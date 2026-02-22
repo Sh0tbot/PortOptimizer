@@ -268,7 +268,7 @@ if optimize_button:
     if autobench: all_tickers = list(set(tickers + list(BENCH_MAP.values())))
     else: all_tickers = list(set(tickers + [bench_clean]))
 
-with st.spinner("Validating symbols and auto-correcting exchanges..."):
+    with st.spinner("Validating symbols and auto-correcting exchanges..."):
         invalid_tickers = []
         corrected_tickers = {}
         
