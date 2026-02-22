@@ -45,7 +45,6 @@ def get_asset_metadata(ticker):
         div_yield = info.get('trailingAnnualDividendYield', info.get('dividendYield', 0.0))
         if div_yield is None: div_yield = 0.0
         
-        # Pull Market Cap for Black-Litterman Prior
         mcap = info.get('marketCap', info.get('totalAssets', 1e9))
         if mcap is None: mcap = 1e9
 
@@ -99,8 +98,8 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
     pdf.set_font("Arial", '', 10)
     for res in stress_results:
         pdf.cell(80, 8, res['Event'], border=1)
-        pdf.cell(55, 8, f"{res['Portfolio Return']*100:.2f}%", border=1, align='C')
-        pdf.cell(55, 8, f"{res['Benchmark Return']*100:.2f}%" if not np.isnan(res['Benchmark Return']) else "N/A", border=1, align='C')
+        pdf.cell(55, 8, f"{res['Portfolio Return']*100:.2f}%" if pd.notnull(res['Portfolio Return']) else "N/A", border=1, align='C')
+        pdf.cell(55, 8, f"{res['Benchmark Return']*100:.2f}%" if pd.notnull(res['Benchmark Return']) else "N/A", border=1, align='C')
         pdf.ln()
     pdf.ln(5)
 
@@ -176,33 +175,12 @@ max_w = st.sidebar.slider("Max Weight per Asset", 10, 100, 100, 5) / 100.0
 st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
 bl_views_input = ""
-# --- BLACK-LITTERMAN LOGIC ---
 if use_bl:
-    from pypfopt import black_litterman, BlackLittermanModel
-    views_dict = {}
-    if bl_views_input.strip():
-        for item in bl_views_input.split(','):
-            if ':' in item:
-                t, v = item.split(':')
-                try: views_dict[t.strip().upper()] = float(v.strip())
-                except ValueError: pass
-            
-    mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
-    try: delta = black_litterman.market_implied_risk_aversion(bench_data)
-    except Exception: delta = 2.5
-                
-    market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
-            
-    if views_dict:
-        bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
-        mu = bl.bl_returns()
-        S = bl.bl_cov()
-    else:
-        mu = market_prior
-                
-    st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
-else:
-    st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
+    bl_views_input = st.sidebar.text_input(
+        "Enter target returns (e.g., AAPL:0.15, SPY:-0.05)", 
+        help="Leave blank to strictly use the market-implied equilibrium prior."
+    )
+
 st.sidebar.header("5. Trade & Forecast")
 portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", min_value=1000, value=100000, step=1000)
 mc_years = st.sidebar.slider("Monte Carlo Years", 1, 30, 10)
@@ -290,9 +268,14 @@ if optimize_button:
             except Exception: delta = 2.5
                 
             market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
-            bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict if views_dict else None)
-            mu = bl.bl_returns()
-            S = bl.bl_cov()
+            
+            if views_dict:
+                bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
+                mu = bl.bl_returns()
+                S = bl.bl_cov()
+            else:
+                mu = market_prior
+                
             st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
         else:
             st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
@@ -352,7 +335,7 @@ if st.session_state.optimized:
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
             c_alpha = c_ret - (risk_free_rate + c_beta * ((b_ret.mean() * 252) - risk_free_rate))
             
-    port_yield = sum(custom_weights[t] * st.session_state.asset_meta.get(t, ('', '', 0.0))[2] for t in custom_weights)
+    port_yield = sum(custom_weights[t] * st.session_state.asset_meta.get(t, ('', '', 0.0, 1e9))[2] for t in custom_weights)
     proj_income = port_yield * portfolio_value
 
     st.markdown("### Risk, Return & Income")
@@ -512,23 +495,6 @@ if st.session_state.optimized:
         type="primary"
     )
 
-  # --- LEGAL DISCLAIMER ---
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
-        st.caption("""
-        **Informational Purposes Only:** This application is provided for educational and informational purposes only. It does not constitute financial, investment, legal, or tax advice. 
-        
-        **No Guarantee of Accuracy:** The pricing data and asset metadata are sourced from free public APIs (Yahoo Finance) which may contain errors, omissions, or delays. The creator of this tool makes no representations or warranties regarding the accuracy or completeness of the data.
-        
-        **Inherent Risks:** Financial markets are volatile. The "Optimal" portfolios, Sharpe Ratios, and Monte Carlo forecasts are based purely on historical mathematical models. **Past performance is not indicative of future results.** The projections do not account for trading fees, slippage, taxes, or future market shocks. 
-        
-        **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
-        """)
-
-
-
-
-
-
-
-
+        st.caption("""**Informational Purposes Only:** This app is for educational purposes and does not constitute financial advice. **Use at Your Own Risk:** The creator accepts no liability for investment decisions made using this tool. Past performance is not indicative of future results.""")
