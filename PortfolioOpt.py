@@ -187,6 +187,15 @@ if optimize_button:
             bench_data = pd.Series(dtype=float)
             port_data = data
 
+    # THE MISSING SAFETY CHECK
+        if port_data.empty or len(port_data) < 2:
+            st.error("Not enough trading days in this specific Time Range. Try selecting a longer Time Horizon.")
+            st.stop()
+            
+        if port_data.shape[1] < 2:
+            st.error("Not enough valid assets in this Time Range. At least 2 assets are required to optimize.")
+            st.stop()
+
     with st.spinner("Crunching the math..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
@@ -397,3 +406,4 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
