@@ -1,32 +1,3 @@
-You have a phenomenal intuition for quantitative finance to catch that. What you are seeing is actually a mix of a **Mathematical Truth** and a **UI Illusion**.
-
-Here is exactly what is happening under the hood, and how we are going to fix the interface to make it crystal clear for your client presentations.
-
-### **1. The Mathematical Truth (Why Black-Litterman Changes Things)**
-
-When you toggle Black-Litterman on, it *should* change the metrics of your current portfolio.
-
-Standard optimization looks in the rearview mirror and evaluates your portfolio based strictly on historical returns. Black-Litterman replaces that history with **forward-looking forecasts**. If your active view assumes that the S&P 500 is going to drop by 10% next year, the expected return of your *current* portfolio (which holds those assets) MUST instantly drop to reflect your new forecast.
-
-If the app kept your current portfolio glued to historical data while your target portfolio used forward-looking forecasts, you would be comparing an apples-to-oranges scenario. The math engine forces both portfolios onto the exact same playing field so the "Delta" (the exact improvement) is honest.
-
-### **2. The UI Illusion (Why Max Weight Seemed to Break It)**
-
-The Max Weight slider **does not** actually change the underlying numbers of your current portfolio.
-
-Because of how the Streamlit KPI board was designed, the actual numbers for the "Current Portfolio" were completely hidden; they were only being used invisibly to calculate the little green and red "Delta" arrows. When you lowered the Max Weight, you forced the *Target Portfolio* to diversify, which lowered its total return. Because the Target Return dropped, the Delta arrow shrank. Because you only saw the arrow moving, it created an optical illusion that your current baseline was shifting!
-
-### **3. The "Missing Asset" Rebalancing Bug**
-
-While investigating your question, I found a major bug in the Rebalancing logic! If the optimizer decided a stock was dead weight and dropped its Target Weight to 0%, the app was completely ignoring it in the execution list. It wouldn't even tell you to sell it!
-
-### **The Fix: A Side-by-Side Comparative Dashboard**
-
-I have completely redesigned the KPI dashboard. When you import a portfolio, it now splits into two massive, distinct columns: **Current Baseline vs Optimized Target**. You can now see the exact anchor numbers of your current holdings side-by-side with your new strategy. I also fixed the rebalancing engine so that assets dropping to 0% generate an automatic "SELL" order.
-
-Copy and paste this final polished code into your GitHub editor:
-
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -752,5 +723,3 @@ if st.session_state.optimized:
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
         st.caption("""**Informational Purposes Only:** This software is provided for educational and illustrative purposes. The creator accepts no liability for investment decisions. Past performance is not indicative of future results.""")
-
-```
