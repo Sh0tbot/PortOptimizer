@@ -9,7 +9,7 @@ import tempfile
 from fpdf import FPDF
 
 # --- UI CONFIGURATION ---
-st.set_page_config(page_title="Pro Portfolio Optimizer", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Enterprise Portfolio Manager", layout="wide", page_icon="📈")
 sns.set_theme(style="whitegrid")
 
 # --- SECURITY: PASSWORD PROTECTION ---
@@ -33,74 +33,22 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- PDF GENERATOR FUNCTION ---
-def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, fig_ef, fig_wealth, fig_mc):
-    pdf = FPDF()
-    
-    # --- PAGE 1: Overview & Efficient Frontier ---
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Portfolio Optimization & Strategy Report", ln=True, align='C')
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="1. Core Performance Metrics", ln=True)
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(100, 8, txt=f"Expected Annual Return: {ret*100:.2f}%")
-    pdf.cell(100, 8, txt=f"Annual Volatility (Risk): {vol*100:.2f}%", ln=True)
-    pdf.cell(100, 8, txt=f"Sharpe Ratio: {sharpe:.2f}")
-    pdf.cell(100, 8, txt=f"Sortino Ratio: {sortino:.2f}", ln=True)
-    pdf.cell(100, 8, txt=f"Alpha: {alpha*100:.2f}%" if not np.isnan(alpha) else "Alpha: N/A")
-    pdf.cell(100, 8, txt=f"Beta: {beta:.2f}" if not np.isnan(beta) else "Beta: N/A", ln=True)
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="2. Target Asset Allocation", ln=True)
-    pdf.set_font("Arial", '', 11)
-    for ticker, weight in sorted(weights_dict.items(), key=lambda x: x[1], reverse=True):
-        if weight > 0.001:
-            pdf.cell(200, 6, txt=f"{ticker}: {weight*100:.2f}%", ln=True)
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="3. Efficient Frontier Profile", ln=True)
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_ef:
-        fig_ef.savefig(tmp_ef.name, format="png", bbox_inches="tight", dpi=150)
-        pdf.image(tmp_ef.name, x=15, w=180)
-
-    # --- PAGE 2: Backtest & Forecast ---
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="4. Historical Backtest ($10,000 Growth vs Benchmark)", ln=True)
-    
-    current_y = pdf.get_y()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_wealth:
-        fig_wealth.savefig(tmp_wealth.name, format="png", bbox_inches="tight", dpi=150)
-        pdf.image(tmp_wealth.name, x=15, y=current_y, w=180)
-        
-    pdf.set_y(current_y + 115) # Move cursor below the first image
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="5. Monte Carlo Forecast", ln=True)
-    current_y2 = pdf.get_y()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_mc:
-        fig_mc.savefig(tmp_mc.name, format="png", bbox_inches="tight", dpi=150)
-        pdf.image(tmp_mc.name, x=15, y=current_y2, w=180)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-        pdf.output(tmp_pdf.name)
-        with open(tmp_pdf.name, "rb") as f:
-            return f.read()
-
-# --- HELPER FUNCTION: ASSET METADATA ---
+# --- HELPER FUNCTION: ASSET METADATA & DIVIDENDS ---
+@st.cache_data(ttl=86400)
 def get_asset_metadata(ticker):
-    asset_class, sector = 'Other', 'Unknown'
+    asset_class, sector, div_yield, mcap = 'Other', 'Unknown', 0.0, 1e9
     try:
         info = yf.Ticker(ticker).info
         q_type, country, category = info.get('quoteType', '').upper(), info.get('country', 'Unknown').upper(), info.get('category', '').upper()
         sector_info = info.get('sector', '')
         
+        div_yield = info.get('trailingAnnualDividendYield', info.get('dividendYield', 0.0))
+        if div_yield is None: div_yield = 0.0
+        
+        # Pull Market Cap for Black-Litterman Prior
+        mcap = info.get('marketCap', info.get('totalAssets', 1e9))
+        if mcap is None: mcap = 1e9
+
         if sector_info: sector = sector_info
         elif category: sector = category.title()
 
@@ -117,13 +65,95 @@ def get_asset_metadata(ticker):
     except Exception:
         pass
     if asset_class == 'Other' and ticker.endswith('.TO'): asset_class = 'Canadian Equities'
-    return asset_class, sector
+    return asset_class, sector, div_yield, mcap
+
+# --- PDF GENERATOR FUNCTION ---
+def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, port_yield, income, stress_results, rebalance_df, fig_ef, fig_wealth, fig_mc, is_bl=False):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    title = "Portfolio Strategy & Execution Report (Black-Litterman)" if is_bl else "Portfolio Strategy & Execution Report"
+    pdf.cell(200, 10, txt=title, ln=True, align='C')
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="1. Core Performance & Income Metrics", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(95, 8, txt=f"Expected Annual Return: {ret*100:.2f}%")
+    pdf.cell(95, 8, txt=f"Annual Volatility (Risk): {vol*100:.2f}%", ln=True)
+    pdf.cell(95, 8, txt=f"Sharpe Ratio: {sharpe:.2f}")
+    pdf.cell(95, 8, txt=f"Sortino Ratio: {sortino:.2f}", ln=True)
+    pdf.cell(95, 8, txt=f"Alpha: {alpha*100:.2f}%" if not np.isnan(alpha) else "Alpha: N/A")
+    pdf.cell(95, 8, txt=f"Beta: {beta:.2f}" if not np.isnan(beta) else "Beta: N/A", ln=True)
+    pdf.cell(95, 8, txt=f"Portfolio Dividend Yield: {port_yield*100:.2f}%")
+    pdf.cell(95, 8, txt=f"Proj. Annual Income: ${income:,.2f}", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="2. Historical Scenario Analysis (Stress Tests)", ln=True)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(80, 8, "Historical Event", border=1, align='C')
+    pdf.cell(55, 8, "Portfolio Return", border=1, align='C')
+    pdf.cell(55, 8, "Benchmark Return", border=1, align='C')
+    pdf.ln()
+    pdf.set_font("Arial", '', 10)
+    for res in stress_results:
+        pdf.cell(80, 8, res['Event'], border=1)
+        pdf.cell(55, 8, f"{res['Portfolio Return']*100:.2f}%", border=1, align='C')
+        pdf.cell(55, 8, f"{res['Benchmark Return']*100:.2f}%" if not np.isnan(res['Benchmark Return']) else "N/A", border=1, align='C')
+        pdf.ln()
+    pdf.ln(5)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="3. Efficient Frontier Profile", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_ef:
+        fig_ef.savefig(tmp_ef.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_ef.name, x=15, w=160)
+
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="4. Target Allocation & Rebalancing Actions", ln=True)
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(30, 8, "Ticker", border=1, align='C')
+    pdf.cell(25, 8, "Target %", border=1, align='C')
+    pdf.cell(40, 8, "Current Val ($)", border=1, align='C')
+    pdf.cell(40, 8, "Target Val ($)", border=1, align='C')
+    pdf.cell(50, 8, "Action Required", border=1, align='C')
+    pdf.ln()
+    pdf.set_font("Arial", '', 9)
+    for _, row in rebalance_df.iterrows():
+        pdf.cell(30, 8, str(row['Ticker']), border=1)
+        pdf.cell(25, 8, f"{row['Weight']*100:.2f}%", border=1, align='C')
+        pdf.cell(40, 8, f"${row['Current Value ($)']:,.2f}", border=1, align='R')
+        pdf.cell(40, 8, f"${row['Target Value ($)']:,.2f}", border=1, align='R')
+        pdf.cell(50, 8, str(row['Trade Action']), border=1, align='C')
+        pdf.ln()
+    pdf.ln(5)
+
+    current_y = pdf.get_y()
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="5. Historical Backtest ($10,000 Growth vs Benchmark)", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_wealth:
+        fig_wealth.savefig(tmp_wealth.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_wealth.name, x=15, w=160)
+        
+    pdf.ln(85)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="6. Monte Carlo Forecast", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_mc:
+        fig_mc.savefig(tmp_mc.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_mc.name, x=15, w=160)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        pdf.output(tmp_pdf.name)
+        with open(tmp_pdf.name, "rb") as f:
+            return f.read()
 
 # ==========================================
 # --- APP HEADER ---
 # ==========================================
-st.title("📈 Pro Portfolio Optimizer & Forecaster")
-st.markdown("Optimize allocations, forecast performance, and generate execution reports. Created by Nizar.")
+st.title("📈 Enterprise Portfolio Manager")
+st.markdown("Optimize allocations, stress-test scenarios, forecast income, and generate execution reports.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
@@ -143,8 +173,17 @@ st.sidebar.header("3. Strategy Settings")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
 max_w = st.sidebar.slider("Max Weight per Asset", 10, 100, 100, 5) / 100.0
 
-st.sidebar.header("4. Trade & Forecast")
-portfolio_value = st.sidebar.number_input("Total Portfolio Value ($)", min_value=1000, value=100000, step=1000)
+st.sidebar.header("4. Black-Litterman (Views)")
+use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
+bl_views_input = ""
+if use_bl:
+    bl_views_input = st.sidebar.text_input(
+        "Enter target returns (e.g., AAPL:0.15, SPY:-0.05)", 
+        help="Leave blank to strictly use the market-implied equilibrium prior."
+    )
+
+st.sidebar.header("5. Trade & Forecast")
+portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", min_value=1000, value=100000, step=1000)
 mc_years = st.sidebar.slider("Monte Carlo Years", 1, 30, 10)
 mc_sims = st.sidebar.selectbox("Simulations", (100, 500, 1000), index=1)
 
@@ -161,63 +200,39 @@ if optimize_button:
     else:
         tickers = [t.strip().upper() for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
 
-# ... previous code ...
-    if len(tickers) < 2: 
-        st.warning("Provide at least two valid tickers.")
-        st.stop()
-    if max_w < (1.0 / len(tickers)): 
-        st.error("Constraint mathematically impossible.")
-        st.stop()
+    if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
+    if max_w < (1.0 / len(tickers)): st.error("Constraint mathematically impossible."); st.stop()
         
-    # --- THESE ARE THE MISSING LINES ---
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
-    # -----------------------------------
 
     with st.spinner("Validating symbols and downloading market data..."):
-        
-        # --- THE BULLETPROOF INVALID TICKER CHECK ---
         invalid_tickers = []
         for t in all_tickers:
-    # ... rest of the code ...
-            # A quick 1-month history check is the most reliable way to see if a ticker is real and actively trading
             if yf.Ticker(t).history(period="1mo").empty:
                 invalid_tickers.append(t)
                 
         if invalid_tickers:
             st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**")
-            st.warning("Please check your spelling (remember to append '.TO' for Canadian funds) and try again.")
+            st.warning("Please check your spelling and try again.")
             st.stop()
             
-        # --- IF ALL VALID, PROCEED WITH BULK DOWNLOAD ---
         fetch_start = min(start_date, pd.to_datetime("2020-01-01"))
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
         st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
         
-        if st.session_state.full_historical_data.empty: 
-            st.error("No data found.")
-            st.stop()
-        
+        if st.session_state.full_historical_data.empty: st.error("No data found."); st.stop()
         raw_data = st.session_state.full_historical_data
-        try: 
-            data = raw_data['Adj Close']
+        try: data = raw_data['Adj Close']
         except KeyError:
-            try: 
-                data = raw_data['Close']
-            except KeyError: 
-                st.error("Pricing columns not found.")
-                st.stop()
+            try: data = raw_data['Close']
+            except KeyError: st.error("Pricing columns not found."); st.stop()
 
         if isinstance(data, pd.Series): 
             data = data.to_frame()
-            # If duplicates resulted in only 1 unique ticker, name the column properly
-            if len(all_tickers) == 1:
-                data.columns = [all_tickers[0]]
+            if len(all_tickers) == 1: data.columns = [all_tickers[0]]
 
-        # Clean the valid data
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
-        
-        # Subset data for optimization based on user's selected time horizon
         opt_data = data.loc[start_date:end_date]
         
         if bench_clean in opt_data.columns:
@@ -227,33 +242,57 @@ if optimize_button:
             bench_data = pd.Series(dtype=float)
             port_data = opt_data
             
-        # THE SAFETY CHECK
         if port_data.empty or len(port_data) < 2:
             st.error("Not enough trading days in this specific Time Range. Try selecting a longer Time Horizon.")
             st.stop()
-            
         if port_data.shape[1] < 2:
             st.error("Not enough valid assets in this Time Range. At least 2 assets are required to optimize.")
             st.stop()
+
+    with st.spinner("Crunching optimization matrices..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
+        
+        # --- BLACK-LITTERMAN LOGIC ---
+        if use_bl:
+            from pypfopt import black_litterman, BlackLittermanModel
+            views_dict = {}
+            if bl_views_input.strip():
+                for item in bl_views_input.split(','):
+                    if ':' in item:
+                        t, v = item.split(':')
+                        try: views_dict[t.strip().upper()] = float(v.strip())
+                        except ValueError: pass
+            
+            mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
+            try: delta = black_litterman.market_implied_risk_aversion(bench_data)
+            except Exception: delta = 2.5
+                
+            market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
+            bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict if views_dict else None)
+            mu = bl.bl_returns()
+            S = bl.bl_cov()
+            st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
+        else:
+            st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
+
         ef = EfficientFrontier(mu, S, weight_bounds=(0, max_w))
         raw_weights = ef.max_sharpe() if "Max Sharpe" in opt_metric else ef.min_volatility()
             
-        st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
         st.session_state.mu, st.session_state.S = mu, S
         st.session_state.cleaned_weights = ef.clean_weights()
         st.session_state.ret, st.session_state.vol, st.session_state.sharpe = ef.portfolio_performance()
         st.session_state.asset_list = list(mu.index)
         st.session_state.daily_returns = port_data.pct_change().dropna()
         st.session_state.bench_returns = bench_data.pct_change().dropna() if not bench_data.empty else None
+        st.session_state.stress_data = data
+        st.session_state.bench_clean = bench_clean
+        st.session_state.is_bl = use_bl
         st.session_state.optimized = True
 
 # --- DASHBOARD VISUALS ---
 if st.session_state.optimized:
     st.markdown("---")
-    
-    # THE WHAT-IF SLIDER
     st.subheader(f"🎛️ Adjust Allocation ({st.session_state.opt_target} Baseline)")
     adj_col1, adj_col2 = st.columns([1, 2])
     with adj_col1:
@@ -272,7 +311,6 @@ if st.session_state.optimized:
             else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
     custom_weights[adj_asset] = new_w
     
-    # MATH CALCULATIONS
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -292,23 +330,19 @@ if st.session_state.optimized:
             cov_matrix = np.cov(p_ret, b_ret)
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
             c_alpha = c_ret - (risk_free_rate + c_beta * ((b_ret.mean() * 252) - risk_free_rate))
+            
+    port_yield = sum(custom_weights[t] * st.session_state.asset_meta.get(t, ('', '', 0.0))[2] for t in custom_weights)
+    proj_income = port_yield * portfolio_value
 
-    # --- TOP METRICS BOARD ---
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    st.markdown("### Risk, Return & Income")
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Exp. Return", f"{c_ret*100:.2f}%")
     m2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
-    m3.metric("Sortino Ratio", f"{c_sortino:.2f}")
-    if not np.isnan(c_beta):
-        m4.metric("Beta (β)", f"{c_beta:.2f}"); m5.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
-    else: m4.metric("Beta", "N/A"); m5.metric("Alpha", "N/A")
-    m6.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
-    
+    m3.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
+    m4.metric("Dividend Yield", f"{port_yield*100:.2f}%")
+    m5.metric("Annual Income", f"${proj_income:,.2f}")
     st.markdown("---")
 
-    # ==========================================
-    # --- PRE-GENERATE CHARTS FOR PDF ---
-    # ==========================================
-    # 1. Efficient Frontier
     ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
     fig_ef, ax_ef = plt.subplots(figsize=(6, 4))
     plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
@@ -317,7 +351,6 @@ if st.session_state.optimized:
     ax_ef.set_title("Efficient Frontier Profile")
     ax_ef.legend()
 
-    # 2. Historical Backtest
     port_wealth = (1 + port_daily).cumprod() * 10000
     bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
     fig_wealth, ax_wealth = plt.subplots(figsize=(7, 4))
@@ -328,7 +361,6 @@ if st.session_state.optimized:
     ax_wealth.set_ylabel("Portfolio Value ($)")
     ax_wealth.legend()
 
-    # 3. Monte Carlo Simulation
     np.random.seed(42)
     dt = 1
     sim_results = np.zeros((int(mc_sims), mc_years + 1))
@@ -352,22 +384,26 @@ if st.session_state.optimized:
     ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
     ax_mc.legend()
 
-    # --- PDF DOWNLOAD BUTTON (Now has access to all charts) ---
-    st.markdown("### 📄 Export Strategy")
-    pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, fig_ef, fig_wealth, fig_mc)
-    st.download_button(
-        label="Download Comprehensive PDF Report",
-        data=pdf_bytes,
-        file_name="Complete_Portfolio_Report.pdf",
-        mime="application/pdf",
-        type="primary"
-    )
-    st.markdown("---")
+    stress_events = {
+        "COVID-19 Crash (Feb-Mar 2020)": ("2020-02-19", "2020-03-23"),
+        "2022 Bear Market (Jan-Oct 2022)": ("2022-01-03", "2022-10-12")
+    }
+    stress_results = []
+    hist_data = st.session_state.stress_data
+    bench_c = st.session_state.bench_clean
+    for event_name, (s_date, e_date) in stress_events.items():
+        try:
+            window_data = hist_data.loc[s_date:e_date]
+            if not window_data.empty and len(window_data) > 5:
+                asset_rets = (window_data.iloc[-1] / window_data.iloc[0]) - 1
+                p_ret = sum(custom_weights.get(t, 0) * asset_rets.get(t, 0) for t in custom_weights)
+                b_ret = asset_rets.get(bench_c, np.nan) if bench_c in asset_rets else np.nan
+                stress_results.append({'Event': event_name, 'Portfolio Return': p_ret, 'Benchmark Return': b_ret})
+            else:
+                stress_results.append({'Event': event_name, 'Portfolio Return': np.nan, 'Benchmark Return': np.nan})
+        except Exception: pass
 
-    # ==========================================
-    # --- PRO TAPPED NAVIGATION ---
-    # ==========================================
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio & Optimization", "💱 Trade Calculator", "📈 Historical Backtest", "🔮 Monte Carlo Forecast"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Optimization", "⚖️ Rebalancing Engine", "📉 Stress Tests", "📈 Backtest", "🔮 Monte Carlo"])
 
     with tab1:
         col_charts1, col_charts2 = st.columns([1, 1])
@@ -382,31 +418,43 @@ if st.session_state.optimized:
             st.pyplot(fig_corr)
 
     with tab2:
-        trade_data = []
+        st.markdown("### Actionable Rebalancing Plan")
+        rebal_data = []
         for t, w in custom_weights.items():
             if w > 0.001:
-                a_class, a_sector = st.session_state.asset_meta.get(t, ('Other', 'Unknown'))
-                trade_data.append({'Ticker': t, 'Weight': w, 'Dollar Value ($)': w * portfolio_value, 'Asset Class': a_class, 'Sector': a_sector})
-                
-        trade_df = pd.DataFrame(trade_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
-        calc_col1, calc_col2 = st.columns([2, 1])
+                meta = st.session_state.asset_meta.get(t, ('Other', 'Unknown', 0.0, 1e9))
+                a_class, a_sector, a_yield = meta[0], meta[1], meta[2]
+                rebal_data.append({
+                    'Ticker': t, 'Weight': w, 'Target Value ($)': w * portfolio_value, 
+                    'Asset Class': a_class, 'Sector': a_sector, 'Yield': f"{a_yield*100:.2f}%"
+                })
+        trade_df = pd.DataFrame(rebal_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
         
-        with calc_col1:
-            display_trade = trade_df.copy()
-            display_trade['Weight'] = (display_trade['Weight'] * 100).round(2).astype(str) + '%'
-            display_trade['Dollar Value ($)'] = display_trade['Dollar Value ($)'].apply(lambda x: f"${x:,.2f}")
-            st.dataframe(display_trade, use_container_width=True)
-            csv = display_trade.to_csv(index=False)
-            st.download_button("📥 Download Trade Sheet (CSV)", data=csv, file_name='trade_calculator.csv', mime='text/csv')
-            
-        with calc_col2:
-            sector_totals = trade_df.groupby('Sector')['Weight'].sum()
-            fig_sec, ax_sec = plt.subplots(figsize=(4, 4))
-            ax_sec.pie(sector_totals, labels=sector_totals.index, autopct='%1.1f%%', colors=sns.color_palette("muted"))
-            ax_sec.set_title("Sector Exposure")
-            st.pyplot(fig_sec)
+        editable_df = pd.DataFrame({'Ticker': trade_df['Ticker'], 'Current Value ($)': [0.0]*len(trade_df)})
+        edited_df = st.data_editor(editable_df, hide_index=True, use_container_width=True)
+        
+        merged_df = pd.merge(trade_df, edited_df, on='Ticker', how='left')
+        merged_df['Action ($)'] = merged_df['Target Value ($)'] - merged_df['Current Value ($)']
+        merged_df['Trade Action'] = merged_df['Action ($)'].apply(lambda x: f"BUY ${x:,.2f}" if x > 1 else (f"SELL ${abs(x):,.2f}" if x < -1 else "HOLD"))
+        
+        st.markdown("**Execution List:**")
+        display_trade = merged_df[['Ticker', 'Asset Class', 'Yield', 'Current Value ($)', 'Target Value ($)', 'Trade Action']].copy()
+        display_trade['Target Value ($)'] = display_trade['Target Value ($)'].apply(lambda x: f"${x:,.2f}")
+        display_trade['Current Value ($)'] = display_trade['Current Value ($)'].apply(lambda x: f"${x:,.2f}")
+        st.dataframe(display_trade, use_container_width=True)
 
     with tab3:
+        st.markdown("### Scenario Analysis (Historical Stress Testing)")
+        stress_df = pd.DataFrame(stress_results)
+        if not stress_df.empty:
+            display_stress = stress_df.copy()
+            display_stress['Portfolio Return'] = display_stress['Portfolio Return'].apply(lambda x: f"{x*100:.2f}%" if pd.notnull(x) else "N/A")
+            display_stress['Benchmark Return'] = display_stress['Benchmark Return'].apply(lambda x: f"{x*100:.2f}%" if pd.notnull(x) else "N/A")
+            st.table(display_stress)
+        else:
+            st.info("Insufficient historical data to run stress tests.")
+
+    with tab4:
         bt_col1, bt_col2 = st.columns(2)
         with bt_col1:
             st.markdown("**$10,000 Growth vs Benchmark**")
@@ -422,7 +470,7 @@ if st.session_state.optimized:
             ax_dd.set_yticklabels(['{:,.0%}'.format(x) for x in ax_dd.get_yticks()])
             st.pyplot(fig_dd)
 
-    with tab4:
+    with tab5:
         mc_col1, mc_col2 = st.columns([3, 1])
         with mc_col1:
             st.markdown(f"**Projected Value ({mc_years} Years)**")
@@ -431,6 +479,17 @@ if st.session_state.optimized:
             st.info(f"**Bull Market (90th Pct):**\n${pct_90:,.2f}")
             st.success(f"**Median Expectation:**\n${median_val:,.2f}")
             st.error(f"**Bear Market (10th Pct):**\n${pct_10:,.2f}")
+
+    st.markdown("---")
+    st.markdown("### 📄 Export Strategy & Execution Plan")
+    pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, port_yield, proj_income, stress_results, merged_df, fig_ef, fig_wealth, fig_mc, st.session_state.is_bl)
+    st.download_button(
+        label="Download Comprehensive Client/Execution PDF",
+        data=pdf_bytes,
+        file_name="Complete_Portfolio_Execution_Plan.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
 
   # --- LEGAL DISCLAIMER ---
     st.markdown("---")
@@ -444,6 +503,7 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
 
 
