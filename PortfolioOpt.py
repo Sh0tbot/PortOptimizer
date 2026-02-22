@@ -161,17 +161,25 @@ if optimize_button:
     else:
         tickers = [t.strip().upper() for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
 
-    if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
-    if max_w < (1.0 / len(tickers)): st.error(f"Constraint mathematically impossible."); st.stop()
+# ... previous code ...
+    if len(tickers) < 2: 
+        st.warning("Provide at least two valid tickers.")
+        st.stop()
+    if max_w < (1.0 / len(tickers)): 
+        st.error("Constraint mathematically impossible.")
+        st.stop()
         
+    # --- THESE ARE THE MISSING LINES ---
     bench_clean = benchmark_ticker.strip().upper()
     all_tickers = list(set(tickers + [bench_clean]))
+    # -----------------------------------
 
-with st.spinner("Validating symbols and downloading market data..."):
+    with st.spinner("Validating symbols and downloading market data..."):
         
         # --- THE BULLETPROOF INVALID TICKER CHECK ---
         invalid_tickers = []
         for t in all_tickers:
+    # ... rest of the code ...
             # A quick 1-month history check is the most reliable way to see if a ticker is real and actively trading
             if yf.Ticker(t).history(period="1mo").empty:
                 invalid_tickers.append(t)
@@ -436,6 +444,7 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
 
 
