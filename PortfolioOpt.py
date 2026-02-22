@@ -176,11 +176,35 @@ max_w = st.sidebar.slider("Max Weight per Asset", 10, 100, 100, 5) / 100.0
 st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
 bl_views_input = ""
-if use_bl:
-    bl_views_input = st.sidebar.text_input(
-        "Enter target returns (e.g., AAPL:0.15, SPY:-0.05)", 
-        help="Leave blank to strictly use the market-implied equilibrium prior."
-    )
+# --- BLACK-LITTERMAN LOGIC ---
+        if use_bl:
+            from pypfopt import black_litterman, BlackLittermanModel
+            views_dict = {}
+            if bl_views_input.strip():
+                for item in bl_views_input.split(','):
+                    if ':' in item:
+                        t, v = item.split(':')
+                        try: views_dict[t.strip().upper()] = float(v.strip())
+                        except ValueError: pass
+            
+            mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
+            try: delta = black_litterman.market_implied_risk_aversion(bench_data)
+            except Exception: delta = 2.5
+                
+            market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
+            
+            # THE FIX: Only trigger the complex BL engine if you actually typed in a view
+            if views_dict:
+                bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
+                mu = bl.bl_returns()
+                S = bl.bl_cov()
+            else:
+                # If the box is blank, the mathematical posterior is simply the market prior
+                mu = market_prior
+                
+            st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
+        else:
+            st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
 
 st.sidebar.header("5. Trade & Forecast")
 portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", min_value=1000, value=100000, step=1000)
@@ -503,6 +527,7 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
 
 
