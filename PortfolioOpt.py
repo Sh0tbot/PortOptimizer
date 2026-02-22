@@ -21,7 +21,8 @@ def check_password():
         else:
             st.session_state["password_correct"] = False
 
-    if st.session_state.get("password_correct", False): return True
+    if st.session_state.get("password_correct", False):
+        return True
 
     st.title("🔒 Enterprise Portfolio Optimizer")
     st.text_input("Please enter your access password:", type="password", on_change=password_entered, key="password")
@@ -29,7 +30,8 @@ def check_password():
         st.error("😕 Password incorrect. Please try again.")
     return False
 
-if not check_password(): st.stop()
+if not check_password():
+    st.stop()
 
 # --- HELPER FUNCTION: ASSET METADATA & DIVIDENDS ---
 @st.cache_data(ttl=86400)
@@ -37,7 +39,9 @@ def get_asset_metadata(ticker):
     asset_class, sector, div_yield, mcap = 'Other', 'Unknown', 0.0, 1e9
     try:
         info = yf.Ticker(ticker).info
-        q_type, country, category = info.get('quoteType', '').upper(), info.get('country', 'Unknown').upper(), info.get('category', '').upper()
+        q_type = info.get('quoteType', '').upper()
+        country = info.get('country', 'Unknown').upper()
+        category = info.get('category', '').upper()
         sector_info = info.get('sector', '')
         
         div_yield = info.get('trailingAnnualDividendYield', info.get('dividendYield', 0.0))
@@ -59,7 +63,8 @@ def get_asset_metadata(ticker):
             if country == 'CANADA' or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
             elif country == 'UNITED STATES': asset_class = 'US Equities'
             elif country != 'UNKNOWN': asset_class = 'International Equities'
-    except Exception: pass
+    except Exception:
+        pass
     if asset_class == 'Other' and ticker.endswith('.TO'): asset_class = 'Canadian Equities'
     return asset_class, sector, div_yield, mcap
 
@@ -205,16 +210,21 @@ if optimize_button:
         try:
             df = pd.read_excel(uploaded_file)
             if 'Ticker' in df.columns: tickers = df['Ticker'].dropna().astype(str).tolist()
-        except Exception: st.error("Failed to read Excel file."); st.stop()
+        except Exception: 
+            st.error("Failed to read Excel file.")
+            st.stop()
     else:
         tickers = [t.strip().upper() for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
 
-    if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
-    if max_w < (1.0 / len(tickers)): st.error("Constraint mathematically impossible."); st.stop()
+    if len(tickers) < 2: 
+        st.warning("Provide at least two valid tickers.")
+        st.stop()
+    if max_w < (1.0 / len(tickers)): 
+        st.error("Constraint mathematically impossible.")
+        st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
     
-    # Identify what needs to be downloaded
     if autobench:
         all_tickers = list(set(tickers + list(BENCH_MAP.values())))
     else:
@@ -223,7 +233,8 @@ if optimize_button:
     with st.spinner("Validating symbols and downloading market data..."):
         invalid_tickers = []
         for t in all_tickers:
-            if yf.Ticker(t).history(period="1mo").empty: invalid_tickers.append(t)
+            if yf.Ticker(t).history(period="1mo").empty: 
+                invalid_tickers.append(t)
                 
         if invalid_tickers:
             st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**")
@@ -233,35 +244,42 @@ if optimize_button:
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
         st.session_state.asset_meta = {t: get_asset_metadata(t) for t in tickers}
         
-        if st.session_state.full_historical_data.empty: st.error("No data found."); st.stop()
+        if st.session_state.full_historical_data.empty: 
+            st.error("No data found.")
+            st.stop()
+            
         raw_data = st.session_state.full_historical_data
-        try: data = raw_data['Adj Close']
+        try: 
+            data = raw_data['Adj Close']
         except KeyError:
-            try: data = raw_data['Close']
-            except KeyError: st.error("Pricing columns not found."); st.stop()
+            try: 
+                data = raw_data['Close']
+            except KeyError: 
+                st.error("Pricing columns not found.")
+                st.stop()
 
         if isinstance(data, pd.Series): 
             data = data.to_frame()
-            if len(all_tickers) == 1: data.columns = [all_tickers[0]]
+            if len(all_tickers) == 1: 
+                data.columns = [all_tickers[0]]
 
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_date:end_date]
         
-        # FIX: Only extract the user's explicit tickers for the optimization engine
         valid_tickers = [t for t in tickers if t in opt_data.columns]
         port_data = opt_data[valid_tickers]
         
-        # Save proxy data or static benchmark data
         if autobench:
             st.session_state.proxy_data = data[[p for p in BENCH_MAP.values() if p in data.columns]]
-            bench_data = pd.Series(dtype=float) # Will be calculated dynamically later
+            bench_data = pd.Series(dtype=float)
         elif bench_clean in opt_data.columns:
             bench_data = opt_data[bench_clean]
         else:
             bench_data = pd.Series(dtype=float)
             
         if port_data.empty or len(port_data) < 2:
-            st.error("Not enough trading days/assets in this Time Range."); st.stop()
+            st.error("Not enough trading days/assets in this Time Range.")
+            st.stop()
 
     with st.spinner("Crunching optimization matrices..."):
         mu = expected_returns.mean_historical_return(port_data)
@@ -301,7 +319,6 @@ if optimize_button:
         st.session_state.asset_list = list(mu.index)
         st.session_state.daily_returns = port_data.pct_change().dropna()
         
-        # Save state variables
         st.session_state.bench_returns_static = bench_data.pct_change().dropna() if not bench_data.empty else None
         st.session_state.stress_data = data
         st.session_state.bench_clean = bench_clean
@@ -330,7 +347,6 @@ if st.session_state.optimized:
             else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
     custom_weights[adj_asset] = new_w
     
-    # --- MATH & DYNAMIC BENCHMARKING ---
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -352,19 +368,14 @@ if st.session_state.optimized:
         proxy_returns = st.session_state.proxy_data.pct_change().dropna()
         aligned_proxies = proxy_returns.reindex(port_daily.index).fillna(0)
         
-    bench_daily = pd.Series(0.0, index=port_daily.index)
+        bench_daily = pd.Series(0.0, index=port_daily.index)
         for ac, w in ac_weights.items():
             if w > 0:
                 proxy_ticker = BENCH_MAP[ac]
                 if proxy_ticker in aligned_proxies.columns:
-                    # Extract the proxy data
                     proxy_data = aligned_proxies[proxy_ticker]
-                    
-                    # Force it into a 1D Series if yfinance handed back a DataFrame
                     if isinstance(proxy_data, pd.DataFrame):
                         proxy_data = proxy_data.iloc[:, 0]
-                        
-                    # Use standard addition instead of the buggy '+=' operator
                     bench_daily = bench_daily + (proxy_data * w)
                     
         active_bench_returns = bench_daily
@@ -438,7 +449,6 @@ if st.session_state.optimized:
     ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
     ax_mc.legend()
 
-    # DYNAMIC STRESS TESTS
     stress_events = {
         "COVID-19 Crash (Feb-Mar 2020)": ("2020-02-19", "2020-03-23"),
         "2022 Bear Market (Jan-Oct 2022)": ("2022-01-03", "2022-10-12")
@@ -558,4 +568,3 @@ if st.session_state.optimized:
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
         st.caption("""**Informational Purposes Only:** This app is for educational purposes and does not constitute financial advice. **Use at Your Own Risk:** The creator accepts no liability for investment decisions made using this tool. Past performance is not indicative of future results.""")
-
