@@ -21,8 +21,7 @@ def check_password():
         else:
             st.session_state["password_correct"] = False
 
-    if st.session_state.get("password_correct", False):
-        return True
+    if st.session_state.get("password_correct", False): return True
 
     st.title("🔒 Enterprise Portfolio Optimizer")
     st.text_input("Please enter your access password:", type="password", on_change=password_entered, key="password")
@@ -30,8 +29,7 @@ def check_password():
         st.error("😕 Password incorrect. Please try again.")
     return False
 
-if not check_password():
-    st.stop()
+if not check_password(): st.stop()
 
 # --- HELPER FUNCTION: ASSET METADATA & DIVIDENDS ---
 @st.cache_data(ttl=86400)
@@ -61,13 +59,12 @@ def get_asset_metadata(ticker):
             if country == 'CANADA' or ticker.endswith('.TO'): asset_class = 'Canadian Equities'
             elif country == 'UNITED STATES': asset_class = 'US Equities'
             elif country != 'UNKNOWN': asset_class = 'International Equities'
-    except Exception:
-        pass
+    except Exception: pass
     if asset_class == 'Other' and ticker.endswith('.TO'): asset_class = 'Canadian Equities'
     return asset_class, sector, div_yield, mcap
 
 # --- PDF GENERATOR FUNCTION ---
-def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, port_yield, income, stress_results, rebalance_df, fig_ef, fig_wealth, fig_mc, is_bl=False):
+def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, port_yield, income, stress_results, rebalance_df, fig_ef, fig_wealth, fig_mc, is_bl=False, bench_label="Benchmark"):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -89,7 +86,7 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
     pdf.ln(5)
     
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="2. Historical Scenario Analysis (Stress Tests)", ln=True)
+    pdf.cell(200, 8, txt=f"2. Historical Scenario Analysis ({bench_label})", ln=True)
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(80, 8, "Historical Event", border=1, align='C')
     pdf.cell(55, 8, "Portfolio Return", border=1, align='C')
@@ -131,7 +128,7 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
 
     current_y = pdf.get_y()
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt="5. Historical Backtest ($10,000 Growth vs Benchmark)", ln=True)
+    pdf.cell(200, 8, txt=f"5. Historical Backtest ($10,000 Growth vs {bench_label})", ln=True)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_wealth:
         fig_wealth.savefig(tmp_wealth.name, format="png", bbox_inches="tight", dpi=150)
         pdf.image(tmp_wealth.name, x=15, w=160)
@@ -152,16 +149,32 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
 # --- APP HEADER ---
 # ==========================================
 st.title("📈 Enterprise Portfolio Manager")
-st.markdown("Optimize allocations, stress-test scenarios, forecast income, and generate execution reports.")
+st.markdown("Optimize allocations, autobench performance, forecast income, and generate execution reports.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
 
+# --- CONSTANTS ---
+BENCH_MAP = {
+    'US Equities': 'SPY', 
+    'Canadian Equities': 'XIU.TO', 
+    'International Equities': 'EFA', 
+    'Fixed Income': 'AGG', 
+    'Cash & Equivalents': 'BIL', 
+    'Other': 'SPY'
+}
+
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, JNJ, SPY")
-benchmark_ticker = st.sidebar.text_input("Benchmark:", "SPY")
+manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, XIU.TO, XBB.TO")
+
+autobench = st.sidebar.toggle("Auto-Bench by Asset Allocation", value=False, help="Dynamically creates a blended benchmark to match your custom asset allocation using proxy ETFs.")
+if autobench:
+    st.sidebar.info("📊 Benchmark: Dynamic Allocation Blend")
+    benchmark_ticker = "AUTO"
+else:
+    benchmark_ticker = st.sidebar.text_input("Static Benchmark:", "SPY")
 
 st.sidebar.header("2. Historical Horizon")
 time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years"), index=2)
@@ -176,10 +189,7 @@ st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
 bl_views_input = ""
 if use_bl:
-    bl_views_input = st.sidebar.text_input(
-        "Enter target returns (e.g., AAPL:0.15, SPY:-0.05)", 
-        help="Leave blank to strictly use the market-implied equilibrium prior."
-    )
+    bl_views_input = st.sidebar.text_input("Enter target returns (e.g., AAPL:0.15, SPY:-0.05)")
 
 st.sidebar.header("5. Trade & Forecast")
 portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", min_value=1000, value=100000, step=1000)
@@ -203,17 +213,20 @@ if optimize_button:
     if max_w < (1.0 / len(tickers)): st.error("Constraint mathematically impossible."); st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
-    all_tickers = list(set(tickers + [bench_clean]))
+    
+    # Identify what needs to be downloaded
+    if autobench:
+        all_tickers = list(set(tickers + list(BENCH_MAP.values())))
+    else:
+        all_tickers = list(set(tickers + [bench_clean]))
 
     with st.spinner("Validating symbols and downloading market data..."):
         invalid_tickers = []
         for t in all_tickers:
-            if yf.Ticker(t).history(period="1mo").empty:
-                invalid_tickers.append(t)
+            if yf.Ticker(t).history(period="1mo").empty: invalid_tickers.append(t)
                 
         if invalid_tickers:
             st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**")
-            st.warning("Please check your spelling and try again.")
             st.stop()
             
         fetch_start = min(start_date, pd.to_datetime("2020-01-01"))
@@ -234,25 +247,26 @@ if optimize_button:
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_date:end_date]
         
-        if bench_clean in opt_data.columns:
+        # FIX: Only extract the user's explicit tickers for the optimization engine
+        valid_tickers = [t for t in tickers if t in opt_data.columns]
+        port_data = opt_data[valid_tickers]
+        
+        # Save proxy data or static benchmark data
+        if autobench:
+            st.session_state.proxy_data = data[[p for p in BENCH_MAP.values() if p in data.columns]]
+            bench_data = pd.Series(dtype=float) # Will be calculated dynamically later
+        elif bench_clean in opt_data.columns:
             bench_data = opt_data[bench_clean]
-            port_data = opt_data.drop(columns=[bench_clean], errors='ignore')
         else:
             bench_data = pd.Series(dtype=float)
-            port_data = opt_data
             
         if port_data.empty or len(port_data) < 2:
-            st.error("Not enough trading days in this specific Time Range. Try selecting a longer Time Horizon.")
-            st.stop()
-        if port_data.shape[1] < 2:
-            st.error("Not enough valid assets in this Time Range. At least 2 assets are required to optimize.")
-            st.stop()
+            st.error("Not enough trading days/assets in this Time Range."); st.stop()
 
     with st.spinner("Crunching optimization matrices..."):
         mu = expected_returns.mean_historical_return(port_data)
         S = risk_models.sample_cov(port_data)
         
-        # --- BLACK-LITTERMAN LOGIC ---
         if use_bl:
             from pypfopt import black_litterman, BlackLittermanModel
             views_dict = {}
@@ -264,18 +278,16 @@ if optimize_button:
                         except ValueError: pass
             
             mcaps = {t: st.session_state.asset_meta[t][3] for t in port_data.columns if t in st.session_state.asset_meta}
-            try: delta = black_litterman.market_implied_risk_aversion(bench_data)
+            try: delta = black_litterman.market_implied_risk_aversion(bench_data) if not bench_data.empty else 2.5
             except Exception: delta = 2.5
                 
             market_prior = black_litterman.market_implied_prior_returns(mcaps, delta, S)
-            
             if views_dict:
                 bl = BlackLittermanModel(S, pi=market_prior, absolute_views=views_dict)
                 mu = bl.bl_returns()
                 S = bl.bl_cov()
             else:
                 mu = market_prior
-                
             st.session_state.opt_target = f"Black-Litterman ({'Max Sharpe' if 'Max Sharpe' in opt_metric else 'Min Vol'})"
         else:
             st.session_state.opt_target = "Max Sharpe" if "Max Sharpe" in opt_metric else "Min Volatility"
@@ -288,10 +300,13 @@ if optimize_button:
         st.session_state.ret, st.session_state.vol, st.session_state.sharpe = ef.portfolio_performance()
         st.session_state.asset_list = list(mu.index)
         st.session_state.daily_returns = port_data.pct_change().dropna()
-        st.session_state.bench_returns = bench_data.pct_change().dropna() if not bench_data.empty else None
+        
+        # Save state variables
+        st.session_state.bench_returns_static = bench_data.pct_change().dropna() if not bench_data.empty else None
         st.session_state.stress_data = data
         st.session_state.bench_clean = bench_clean
         st.session_state.is_bl = use_bl
+        st.session_state.autobench = autobench
         st.session_state.optimized = True
 
 # --- DASHBOARD VISUALS ---
@@ -315,6 +330,7 @@ if st.session_state.optimized:
             else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
     custom_weights[adj_asset] = new_w
     
+    # --- MATH & DYNAMIC BENCHMARKING ---
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -326,9 +342,32 @@ if st.session_state.optimized:
     down_stdev = np.sqrt(252) * downside_returns.std()
     c_sortino = (c_ret - risk_free_rate) / down_stdev if down_stdev > 0 else 0
 
+    # DYNAMIC AUTOBENCH CALCULATOR
+    if st.session_state.autobench:
+        ac_weights = {'US Equities': 0.0, 'Canadian Equities': 0.0, 'International Equities': 0.0, 'Fixed Income': 0.0, 'Cash & Equivalents': 0.0, 'Other': 0.0}
+        for t, w in custom_weights.items():
+            meta = st.session_state.asset_meta.get(t, ('Other', 'Unknown', 0.0, 1e9))
+            ac_weights[meta[0]] += w
+            
+        proxy_returns = st.session_state.proxy_data.pct_change().dropna()
+        aligned_proxies = proxy_returns.reindex(port_daily.index).fillna(0)
+        
+        bench_daily = pd.Series(0.0, index=port_daily.index)
+        for ac, w in ac_weights.items():
+            if w > 0:
+                proxy_ticker = BENCH_MAP[ac]
+                if proxy_ticker in aligned_proxies.columns:
+                    bench_daily += aligned_proxies[proxy_ticker] * w
+                    
+        active_bench_returns = bench_daily
+        bench_label = "Auto-Blended Benchmark"
+    else:
+        active_bench_returns = st.session_state.bench_returns_static
+        bench_label = st.session_state.bench_clean
+
     c_beta, c_alpha = np.nan, np.nan
-    if st.session_state.bench_returns is not None:
-        aligned_data = pd.concat([port_daily, st.session_state.bench_returns], axis=1).dropna()
+    if active_bench_returns is not None and not active_bench_returns.empty:
+        aligned_data = pd.concat([port_daily, active_bench_returns], axis=1).dropna()
         if len(aligned_data) > 0:
             p_ret, b_ret = aligned_data.iloc[:, 0], aligned_data.iloc[:, 1]
             cov_matrix = np.cov(p_ret, b_ret)
@@ -345,6 +384,9 @@ if st.session_state.optimized:
     m3.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
     m4.metric("Dividend Yield", f"{port_yield*100:.2f}%")
     m5.metric("Annual Income", f"${proj_income:,.2f}")
+    
+    if st.session_state.autobench:
+        st.caption(f"**Current Benchmark Blend:** " + ", ".join([f"{BENCH_MAP[k]} ({v*100:.1f}%)" for k,v in ac_weights.items() if v > 0.01]))
     st.markdown("---")
 
     ef_plot = EfficientFrontier(st.session_state.mu, st.session_state.S, weight_bounds=(0, max_w))
@@ -356,12 +398,12 @@ if st.session_state.optimized:
     ax_ef.legend()
 
     port_wealth = (1 + port_daily).cumprod() * 10000
-    bench_wealth = (1 + st.session_state.bench_returns).cumprod() * 10000 if st.session_state.bench_returns is not None else None
+    bench_wealth = (1 + active_bench_returns).cumprod() * 10000 if active_bench_returns is not None else None
     fig_wealth, ax_wealth = plt.subplots(figsize=(7, 4))
     ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='#1f77b4', linewidth=2)
     if bench_wealth is not None:
         bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
-        ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=f"Benchmark", color='gray', alpha=0.7)
+        ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=bench_label, color='gray', alpha=0.7)
     ax_wealth.set_ylabel("Portfolio Value ($)")
     ax_wealth.legend()
 
@@ -388,20 +430,30 @@ if st.session_state.optimized:
     ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
     ax_mc.legend()
 
+    # DYNAMIC STRESS TESTS
     stress_events = {
         "COVID-19 Crash (Feb-Mar 2020)": ("2020-02-19", "2020-03-23"),
         "2022 Bear Market (Jan-Oct 2022)": ("2022-01-03", "2022-10-12")
     }
     stress_results = []
     hist_data = st.session_state.stress_data
-    bench_c = st.session_state.bench_clean
+    
     for event_name, (s_date, e_date) in stress_events.items():
         try:
             window_data = hist_data.loc[s_date:e_date]
             if not window_data.empty and len(window_data) > 5:
                 asset_rets = (window_data.iloc[-1] / window_data.iloc[0]) - 1
                 p_ret = sum(custom_weights.get(t, 0) * asset_rets.get(t, 0) for t in custom_weights)
-                b_ret = asset_rets.get(bench_c, np.nan) if bench_c in asset_rets else np.nan
+                
+                if st.session_state.autobench:
+                    b_ret = 0.0
+                    for ac, w in ac_weights.items():
+                        proxy = BENCH_MAP[ac]
+                        if proxy in asset_rets and pd.notnull(asset_rets[proxy]):
+                            b_ret += asset_rets[proxy] * w
+                else:
+                    b_ret = asset_rets.get(st.session_state.bench_clean, np.nan) if st.session_state.bench_clean in asset_rets else np.nan
+                    
                 stress_results.append({'Event': event_name, 'Portfolio Return': p_ret, 'Benchmark Return': b_ret})
             else:
                 stress_results.append({'Event': event_name, 'Portfolio Return': np.nan, 'Benchmark Return': np.nan})
@@ -448,7 +500,7 @@ if st.session_state.optimized:
         st.dataframe(display_trade, use_container_width=True)
 
     with tab3:
-        st.markdown("### Scenario Analysis (Historical Stress Testing)")
+        st.markdown(f"### Scenario Analysis vs {bench_label}")
         stress_df = pd.DataFrame(stress_results)
         if not stress_df.empty:
             display_stress = stress_df.copy()
@@ -461,7 +513,7 @@ if st.session_state.optimized:
     with tab4:
         bt_col1, bt_col2 = st.columns(2)
         with bt_col1:
-            st.markdown("**$10,000 Growth vs Benchmark**")
+            st.markdown(f"**$10,000 Growth vs {bench_label}**")
             st.pyplot(fig_wealth)
         with bt_col2:
             st.markdown("**Historical Drawdowns**")
@@ -486,7 +538,7 @@ if st.session_state.optimized:
 
     st.markdown("---")
     st.markdown("### 📄 Export Strategy & Execution Plan")
-    pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, port_yield, proj_income, stress_results, merged_df, fig_ef, fig_wealth, fig_mc, st.session_state.is_bl)
+    pdf_bytes = generate_pdf_report(custom_weights, c_ret, c_vol, c_sharpe, c_sortino, c_alpha, c_beta, port_yield, proj_income, stress_results, merged_df, fig_ef, fig_wealth, fig_mc, st.session_state.is_bl, bench_label)
     st.download_button(
         label="Download Comprehensive Client/Execution PDF",
         data=pdf_bytes,
