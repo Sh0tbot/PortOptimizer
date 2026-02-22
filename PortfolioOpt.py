@@ -207,7 +207,7 @@ else:
 
 st.sidebar.header("3. Strategy Settings")
 opt_metric = st.sidebar.selectbox("Optimize For:", ("Max Sharpe Ratio", "Minimum Volatility"))
-max_w = st.sidebar.slider("Max Weight per Asset", 5, 100, 100, 5) / 100.0
+max_w = st.sidebar.slider("Max Weight per Asset", 5, 100, 100, 1) / 100.0
 
 st.sidebar.header("4. Black-Litterman (Views)")
 use_bl = st.sidebar.toggle("Enable Black-Litterman Model")
