@@ -93,7 +93,7 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    title = "Portfolio Strategy & Execution Report (Black-Litterman)" if is_bl else "Portfolio Strategy & Execution Report"
+    title = "Portfolio Strategy & Execution Report" if not is_bl else "Portfolio Strategy Report (Black-Litterman)"
     pdf.cell(200, 10, txt=title, ln=True, align='C')
     pdf.ln(5)
     
@@ -174,7 +174,7 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, po
 # --- APP HEADER ---
 # ==========================================
 st.title("📈 Enterprise Portfolio Manager")
-st.markdown("Optimize allocations, autobench performance, forecast income, and generate execution reports.")
+st.markdown("Optimize allocations, compare against current holdings, forecast income, and generate execution reports.")
 
 if "optimized" not in st.session_state:
     st.session_state.optimized = False
@@ -184,7 +184,7 @@ BENCH_MAP = {'US Equities': 'SPY', 'Canadian Equities': 'XIU.TO', 'International
 
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
-uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload Excel/CSV File (Supports Current Weights)", type=["xlsx", "xls", "csv"])
 manual_tickers = st.sidebar.text_input("Or enter tickers manually:", "AAPL, MSFT, GOOG, XIU.TO, XBB.TO")
 
 autobench = st.sidebar.toggle("Auto-Bench by Asset Allocation", value=False, help="Dynamically creates a blended benchmark to match your custom asset allocation using proxy ETFs.")
@@ -194,7 +194,6 @@ if autobench:
 else:
     benchmark_ticker = st.sidebar.text_input("Static Benchmark:", "SPY")
 
-# --- CUSTOM DATE RANGE FEATURE ---
 st.sidebar.header("2. Historical Horizon")
 time_range = st.sidebar.selectbox("Select Time Range", ("1 Year", "3 Years", "5 Years", "7 Years", "10 Years", "Custom Dates"), index=2)
 
@@ -226,22 +225,46 @@ optimize_button = st.sidebar.button("Run Full Analysis", type="primary", use_con
 # --- MAIN APP LOGIC ---
 if optimize_button:
     tickers = []
+    st.session_state.imported_weights = None
+    
     if uploaded_file is not None:
         try:
-            df = pd.read_excel(uploaded_file)
-            if 'Ticker' in df.columns: tickers = df['Ticker'].dropna().astype(str).tolist()
+            if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
+            else: df = pd.read_excel(uploaded_file)
+            
+            # --- CUSTOM EXCEL PARSER FOR CURRENT PORTFOLIO COMPARISON ---
+            if 'Symbol' in df.columns and 'MV (%)' in df.columns:
+                def parse_ticker(row):
+                    t = str(row['Symbol']).strip().upper()
+                    r = str(row.get('Region', '')).strip().upper()
+                    if r == 'CA' and not t.endswith('.TO') and not t.endswith('.V'):
+                        if len(t) > 5 and any(char.isdigit() for char in t): pass # Mutual Fund protection
+                        else: t = t.replace('.', '-') + '.TO' # Fix dual class shares
+                    return t
+                
+                df['Clean_Ticker'] = df.apply(parse_ticker, axis=1)
+                agg_df = df.groupby('Clean_Ticker')['MV (%)'].sum().reset_index()
+                
+                agg_df['MV (%)'] = agg_df['MV (%)'] / 100.0
+                agg_df['MV (%)'] = agg_df['MV (%)'] / agg_df['MV (%)'].sum()
+                
+                tickers = agg_df['Clean_Ticker'].tolist()
+                st.session_state.imported_weights = dict(zip(agg_df['Clean_Ticker'], agg_df['MV (%)']))
+                
+                if 'Market Value' in df.columns:
+                    portfolio_value = float(df['Market Value'].sum())
+            elif 'Ticker' in df.columns:
+                tickers = df['Ticker'].dropna().astype(str).tolist()
         except Exception: 
-            st.error("Failed to read Excel file."); st.stop()
+            st.error("Failed to read imported file. Ensure it has 'Symbol' and 'MV (%)' columns."); st.stop()
     else:
         tickers = [t.strip().upper() for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
 
     if len(tickers) < 2: st.warning("Provide at least two valid tickers."); st.stop()
     if max_w < (1.0 / len(tickers)): st.error("Constraint mathematically impossible."); st.stop()
-        
     if start_date >= end_date: st.error("Start date must be before end date."); st.stop()
         
     bench_clean = benchmark_ticker.strip().upper()
-    
     if autobench: all_tickers = list(set(tickers + list(BENCH_MAP.values())))
     else: all_tickers = list(set(tickers + [bench_clean]))
 
@@ -251,9 +274,19 @@ if optimize_button:
             if yf.Ticker(t).history(period="1mo").empty: invalid_tickers.append(t)
                 
         if invalid_tickers:
-            st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**"); st.stop()
+            # Drop invalid tickers but keep the app running for comparative analysis
+            st.warning(f"⚠️ Omitting unreadable or delisted symbols: **{', '.join(invalid_tickers)}**")
+            all_tickers = [t for t in all_tickers if t not in invalid_tickers]
+            tickers = [t for t in tickers if t not in invalid_tickers]
             
-        # FORCE DEEP DOWNLOAD FOR STRESS TESTS (Back to 2007 for GFC)
+            # Rebalance imported weights to 100% after dropping bad symbols
+            if st.session_state.imported_weights:
+                for t in invalid_tickers: st.session_state.imported_weights.pop(t, None)
+                tot_w = sum(st.session_state.imported_weights.values())
+                if tot_w > 0: st.session_state.imported_weights = {k: v/tot_w for k,v in st.session_state.imported_weights.items()}
+
+        if len(tickers) < 2: st.error("Not enough valid tickers remaining."); st.stop()
+            
         fetch_start = min(start_date, pd.to_datetime("2007-01-01"))
         st.session_state.full_historical_data = yf.download(all_tickers, start=fetch_start, end=end_date)
         
@@ -274,9 +307,7 @@ if optimize_button:
 
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         
-        # ISOLATE OPTIMIZATION DATA TO USER DATE RANGE
         opt_data = data.loc[start_date:end_date]
-        
         valid_tickers = [t for t in tickers if t in opt_data.columns]
         port_data = opt_data[valid_tickers]
         
@@ -289,7 +320,7 @@ if optimize_button:
             bench_data = pd.Series(dtype=float)
             
         if port_data.empty or len(port_data) < 2:
-            st.error("Not enough trading days/assets in this Time Range. Try a different date range."); st.stop()
+            st.error("Not enough trading days/assets in this Time Range."); st.stop()
 
     with st.spinner("Crunching optimization matrices..."):
         mu = expected_returns.mean_historical_return(port_data)
@@ -333,6 +364,7 @@ if optimize_button:
         st.session_state.bench_clean = bench_clean
         st.session_state.is_bl = use_bl
         st.session_state.autobench = autobench
+        st.session_state.portfolio_value_target = portfolio_value
         st.session_state.optimized = True
 
 # --- DASHBOARD VISUALS ---
@@ -340,7 +372,7 @@ if st.session_state.optimized:
     st.markdown("---")
     
     with st.container():
-        st.subheader(f"🎛️ Adjust Allocation ({st.session_state.opt_target} Baseline)")
+        st.subheader(f"🎛️ Adjust Target Allocation ({st.session_state.opt_target} Baseline)")
         adj_col1, adj_col2 = st.columns([1, 2])
         with adj_col1:
             adj_asset = st.selectbox("Select Asset to Adjust:", st.session_state.asset_list)
@@ -358,6 +390,7 @@ if st.session_state.optimized:
                 else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
         custom_weights[adj_asset] = new_w
     
+    # CALCULATE CUSTOM / OPTIMIZED PORTFOLIO
     w_array = np.array([custom_weights[t] for t in st.session_state.asset_list])
     c_ret = np.dot(w_array, st.session_state.mu.values)
     c_vol = np.sqrt(np.dot(w_array.T, np.dot(st.session_state.S.values, w_array)))
@@ -368,7 +401,27 @@ if st.session_state.optimized:
     downside_returns = port_daily[port_daily < 0]
     down_stdev = np.sqrt(252) * downside_returns.std()
     c_sortino = (c_ret - risk_free_rate) / down_stdev if down_stdev > 0 else 0
+    
+    port_yield = sum(custom_weights[t] * st.session_state.asset_meta.get(t, ('', '', 0.0, 1e9))[2] for t in custom_weights)
+    proj_income = port_yield * st.session_state.portfolio_value_target
 
+    # CALCULATE BASELINE / CURRENT IMPORTED PORTFOLIO (If Available)
+    curr_ret, curr_vol, curr_sharpe, curr_sortino, curr_yield, curr_income = 0, 0, 0, 0, 0, 0
+    if st.session_state.imported_weights:
+        curr_w_array = np.array([st.session_state.imported_weights.get(t, 0.0) for t in st.session_state.asset_list])
+        curr_ret = np.dot(curr_w_array, st.session_state.mu.values)
+        curr_vol = np.sqrt(np.dot(curr_w_array.T, np.dot(st.session_state.S.values, curr_w_array)))
+        curr_sharpe = (curr_ret - risk_free_rate) / curr_vol if curr_vol > 0 else 0
+        
+        curr_port_daily = st.session_state.daily_returns.dot(curr_w_array)
+        curr_downside = curr_port_daily[curr_port_daily < 0]
+        curr_down_stdev = np.sqrt(252) * curr_downside.std()
+        curr_sortino = (curr_ret - risk_free_rate) / curr_down_stdev if curr_down_stdev > 0 else 0
+        
+        curr_yield = sum(st.session_state.imported_weights.get(t, 0.0) * st.session_state.asset_meta.get(t, ('', '', 0.0, 1e9))[2] for t in st.session_state.asset_list)
+        curr_income = curr_yield * st.session_state.portfolio_value_target
+
+    # CALCULATE BENCHMARK DYNAMICS
     if st.session_state.autobench:
         ac_weights = {'US Equities': 0.0, 'Canadian Equities': 0.0, 'International Equities': 0.0, 'Fixed Income': 0.0, 'Cash & Equivalents': 0.0, 'Other': 0.0}
         for t, w in custom_weights.items():
@@ -401,22 +454,33 @@ if st.session_state.optimized:
             cov_matrix = np.cov(p_ret, b_ret)
             c_beta = cov_matrix[0, 1] / cov_matrix[1, 1]
             c_alpha = c_ret - (risk_free_rate + c_beta * ((b_ret.mean() * 252) - risk_free_rate))
-            
-    port_yield = sum(custom_weights[t] * st.session_state.asset_meta.get(t, ('', '', 0.0, 1e9))[2] for t in custom_weights)
-    proj_income = port_yield * portfolio_value
 
     st.markdown("---")
     
-    st.markdown("### 📊 Strategy Performance Overview")
+    title_text = "### 📊 Strategy Performance Overview" if not st.session_state.imported_weights else "### 📊 Target vs Current Portfolio Performance"
+    st.markdown(title_text)
+    
     kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-    kpi_col1.metric("Exp. Return", f"{c_ret*100:.2f}%")
-    kpi_col2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
-    kpi_col3.metric("Dividend Yield", f"{port_yield*100:.2f}%")
-    kpi_col4.metric("Annual Income", f"${proj_income:,.2f}")
+    if st.session_state.imported_weights:
+        kpi_col1.metric("Exp. Return", f"{c_ret*100:.2f}%", f"{(c_ret - curr_ret)*100:.2f}% vs Current")
+        kpi_col2.metric("Sharpe Ratio", f"{c_sharpe:.2f}", f"{(c_sharpe - curr_sharpe):.2f} vs Current")
+        kpi_col3.metric("Dividend Yield", f"{port_yield*100:.2f}%", f"{(port_yield - curr_yield)*100:.2f}% vs Current")
+        kpi_col4.metric("Annual Income", f"${proj_income:,.2f}", f"${proj_income - curr_income:,.2f} vs Current")
+    else:
+        kpi_col1.metric("Exp. Return", f"{c_ret*100:.2f}%")
+        kpi_col2.metric("Sharpe Ratio", f"{c_sharpe:.2f}")
+        kpi_col3.metric("Dividend Yield", f"{port_yield*100:.2f}%")
+        kpi_col4.metric("Annual Income", f"${proj_income:,.2f}")
     
     kpi_col5, kpi_col6, kpi_col7, kpi_col8 = st.columns(4)
-    kpi_col5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
-    kpi_col6.metric("Sortino Ratio", f"{c_sortino:.2f}")
+    if st.session_state.imported_weights:
+        # Lower risk is better, so if optimized risk is lower, show green arrow by multiplying by -1 for the UI delta
+        kpi_col5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%", f"{(c_vol - curr_vol)*100:.2f}% vs Current", delta_color="inverse")
+        kpi_col6.metric("Sortino Ratio", f"{c_sortino:.2f}", f"{(c_sortino - curr_sortino):.2f} vs Current")
+    else:
+        kpi_col5.metric("Std Dev (Risk)", f"{c_vol*100:.2f}%")
+        kpi_col6.metric("Sortino Ratio", f"{c_sortino:.2f}")
+        
     if not np.isnan(c_alpha):
         kpi_col7.metric("Alpha (α)", f"{c_alpha*100:.2f}%")
         kpi_col8.metric("Beta (β)", f"{c_beta:.2f}")
@@ -433,13 +497,19 @@ if st.session_state.optimized:
     plotting.plot_efficient_frontier(ef_plot, ax=ax_ef, show_assets=True)
     ax_ef.scatter(st.session_state.vol, st.session_state.ret, marker="*", s=200, c="r", label=f"{st.session_state.opt_target}")
     ax_ef.scatter(c_vol, c_ret, marker="o", s=150, c="b", edgecolors='black', label="Custom Allocation")
+    if st.session_state.imported_weights:
+        ax_ef.scatter(curr_vol, curr_ret, marker="X", s=150, c="green", edgecolors='black', label="Current Allocation")
     ax_ef.set_title("Efficient Frontier Profile")
     ax_ef.legend()
 
     port_wealth = (1 + port_daily).cumprod() * 10000
     bench_wealth = (1 + active_bench_returns).cumprod() * 10000 if active_bench_returns is not None else None
+    
     fig_wealth, ax_wealth = plt.subplots(figsize=(10, 5))
-    ax_wealth.plot(port_wealth.index, port_wealth, label="Custom Portfolio", color='#1f77b4', linewidth=2)
+    ax_wealth.plot(port_wealth.index, port_wealth, label="Target Portfolio", color='#1f77b4', linewidth=2)
+    if st.session_state.imported_weights:
+        curr_wealth = (1 + curr_port_daily).cumprod() * 10000
+        ax_wealth.plot(curr_wealth.index, curr_wealth, label="Current Portfolio", color='green', linewidth=2, linestyle='--')
     if bench_wealth is not None:
         bench_wealth_aligned = bench_wealth.reindex(port_wealth.index).ffill()
         ax_wealth.plot(port_wealth.index, bench_wealth_aligned, label=bench_label, color='gray', alpha=0.7)
@@ -449,11 +519,11 @@ if st.session_state.optimized:
     np.random.seed(42)
     dt = 1
     sim_results = np.zeros((int(mc_sims), mc_years + 1))
-    sim_results[:, 0] = portfolio_value
+    sim_results[:, 0] = st.session_state.portfolio_value_target
     for i in range(int(mc_sims)):
         Z = np.random.standard_normal(mc_years)
         growth_factors = np.exp((c_ret - (c_vol**2)/2)*dt + c_vol * np.sqrt(dt) * Z)
-        sim_results[i, 1:] = portfolio_value * np.cumprod(growth_factors)
+        sim_results[i, 1:] = st.session_state.portfolio_value_target * np.cumprod(growth_factors)
         
     final_values = sim_results[:, -1]
     median_val = np.percentile(final_values, 50)
@@ -469,7 +539,6 @@ if st.session_state.optimized:
     ax_mc.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:,}".format(int(x))))
     ax_mc.legend()
 
-    # --- EXPANDED STRESS TESTS ---
     stress_events = {
         "2008 Financial Crisis (Oct '07 - Mar '09)": ("2007-10-09", "2009-03-09"),
         "2018 Q4 Selloff (Sep '18 - Dec '18)": ("2018-09-20", "2018-12-24"),
@@ -512,12 +581,12 @@ if st.session_state.optimized:
                 
         pie_col1, pie_col2, pie_col3 = st.columns(3)
         with pie_col1:
-            st.markdown("**Asset Class**")
+            st.markdown("**Target Asset Class**")
             fig_ac, ax_ac = plt.subplots(figsize=(6, 6))
             ax_ac.pie(ac_totals.values(), labels=ac_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("pastel"))
             st.pyplot(fig_ac, use_container_width=True, clear_figure=True)
         with pie_col2:
-            st.markdown("**Sector Exposure**")
+            st.markdown("**Target Sector Exposure**")
             fig_sec, ax_sec = plt.subplots(figsize=(6, 6))
             ax_sec.pie(sec_totals.values(), labels=sec_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("muted"))
             st.pyplot(fig_sec, use_container_width=True, clear_figure=True)
@@ -539,12 +608,20 @@ if st.session_state.optimized:
             if w > 0.001:
                 meta = st.session_state.asset_meta.get(t, ('Other', 'Unknown', 0.0, 1e9))
                 rebal_data.append({
-                    'Ticker': t, 'Weight': w, 'Target Value ($)': w * portfolio_value, 
+                    'Ticker': t, 'Weight': w, 'Target Value ($)': w * st.session_state.portfolio_value_target, 
                     'Asset Class': meta[0], 'Sector': meta[1], 'Yield': f"{meta[2]*100:.2f}%"
                 })
         trade_df = pd.DataFrame(rebal_data).sort_values(by='Weight', ascending=False).reset_index(drop=True)
         
-        editable_df = pd.DataFrame({'Ticker': trade_df['Ticker'], 'Current Value ($)': [0.0]*len(trade_df)})
+        # Populate the Current Value list automatically if we imported weights
+        current_vals = [0.0]*len(trade_df)
+        if st.session_state.imported_weights:
+            for idx, row in trade_df.iterrows():
+                t = row['Ticker']
+                curr_w = st.session_state.imported_weights.get(t, 0.0)
+                current_vals[idx] = curr_w * st.session_state.portfolio_value_target
+
+        editable_df = pd.DataFrame({'Ticker': trade_df['Ticker'], 'Current Value ($)': current_vals})
         edited_df = st.data_editor(editable_df, hide_index=True, use_container_width=True)
         
         merged_df = pd.merge(trade_df, edited_df, on='Ticker', how='left')
