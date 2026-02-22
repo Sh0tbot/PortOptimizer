@@ -177,7 +177,18 @@ if optimize_button:
             try: data = raw_data['Close']
             except KeyError: st.error("Pricing columns not found."); st.stop()
 
-        if isinstance(data, pd.Series): data = data.to_frame()
+if isinstance(data, pd.Series): data = data.to_frame()
+        
+        # --- NEW: DETECT INVALID TICKERS ---
+        # Scan for tickers that returned completely blank columns
+        invalid_tickers = [t for t in tickers if t not in data.columns or data[t].isna().all()]
+        
+        if invalid_tickers:
+            st.error(f"❌ Unrecognized or delisted symbols detected: **{', '.join(invalid_tickers)}**")
+            st.warning("Please check your spelling (remember to append '.TO' for Canadian funds) and try again.")
+            st.stop()
+
+        # Clean the remaining valid data
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         
         if bench_clean in data.columns:
@@ -406,4 +417,5 @@ if st.session_state.optimized:
         
         **Use at Your Own Risk:** By using this tool, you acknowledge that you are solely responsible for your own investment decisions. The creator of this application accepts no liability whatsoever for any losses or damages arising from the use of this software or its outputs. Always consult with a licensed and registered financial advisor before making investment decisions.
         """)
+
 
