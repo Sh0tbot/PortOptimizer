@@ -352,12 +352,20 @@ if st.session_state.optimized:
         proxy_returns = st.session_state.proxy_data.pct_change().dropna()
         aligned_proxies = proxy_returns.reindex(port_daily.index).fillna(0)
         
-        bench_daily = pd.Series(0.0, index=port_daily.index)
+bench_daily = pd.Series(0.0, index=port_daily.index)
         for ac, w in ac_weights.items():
             if w > 0:
                 proxy_ticker = BENCH_MAP[ac]
                 if proxy_ticker in aligned_proxies.columns:
-                    bench_daily += aligned_proxies[proxy_ticker] * w
+                    # Extract the proxy data
+                    proxy_data = aligned_proxies[proxy_ticker]
+                    
+                    # Force it into a 1D Series if yfinance handed back a DataFrame
+                    if isinstance(proxy_data, pd.DataFrame):
+                        proxy_data = proxy_data.iloc[:, 0]
+                        
+                    # Use standard addition instead of the buggy '+=' operator
+                    bench_daily = bench_daily + (proxy_data * w)
                     
         active_bench_returns = bench_daily
         bench_label = "Auto-Blended Benchmark"
@@ -550,3 +558,4 @@ if st.session_state.optimized:
     st.markdown("---")
     with st.expander("⚠️ Legal Disclaimer & Terms of Use"):
         st.caption("""**Informational Purposes Only:** This app is for educational purposes and does not constitute financial advice. **Use at Your Own Risk:** The creator accepts no liability for investment decisions made using this tool. Past performance is not indicative of future results.""")
+
