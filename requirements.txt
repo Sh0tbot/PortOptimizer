@@ -1,8 +1,13 @@
-streamlit
-yfinance
+streamlit>=1.40.0
 pandas
+numpy
 matplotlib
 seaborn
 PyPortfolioOpt
-fpdf
+requests
+fpdf2
+yfinance
+google-generativeai>=0.8.0
+plotly>=5.18.0
+kaleido>=0.2.1
 openpyxl
